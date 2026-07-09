@@ -85,7 +85,10 @@ npm run test:x402
 This mode does not settle real payments. It verifies that unpaid requests return HTTP 402 plus a `PAYMENT-REQUIRED` header.
 
 ```bash
-PORT=8788 PAYMENT_MODE=mock-x402 npm start
+PORT=8788 \
+PAYMENT_MODE=mock-x402 \
+PUBLIC_BASE_URL=https://your-public-domain.example \
+npm start
 ```
 
 Then test any endpoint:
@@ -129,6 +132,8 @@ This folder includes deployment starters:
 - `deploy/nginx/a2mcp-signal-snapshot.conf`: reverse proxy template before adding HTTPS.
 
 For OKX.AI A2MCP listing, the endpoint should be a stable public HTTPS URL. Localhost and temporary tunnels are only useful for development checks.
+
+Set `PUBLIC_BASE_URL` to the HTTPS origin so `/metadata` can include complete `endpointUrl` fields for each listable service.
 
 ## Candidate OKX.AI A2MCP Listings
 

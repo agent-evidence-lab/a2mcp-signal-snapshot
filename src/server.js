@@ -17,6 +17,17 @@ const X402_TOKEN_NAME = process.env.X402_TOKEN_NAME || "USD\u20ae0";
 const X402_TOKEN_SYMBOL = process.env.X402_TOKEN_SYMBOL || "USDT0";
 const X402_TOKEN_VERSION = process.env.X402_TOKEN_VERSION || "1";
 
+function normalizePublicBaseUrl(value) {
+  const normalized = String(value || "").trim().replace(/\/+$/, "");
+  return /^https?:\/\//i.test(normalized) ? normalized : "";
+}
+
+const PUBLIC_BASE_URL = normalizePublicBaseUrl(process.env.PUBLIC_BASE_URL);
+
+function publicUrl(path) {
+  return PUBLIC_BASE_URL ? `${PUBLIC_BASE_URL}${path}` : undefined;
+}
+
 function normalizeDecimals(value) {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : 6;
@@ -634,7 +645,7 @@ function buildSnapshot(input) {
     sources: [
       {
         name: "Local A2MCP Suite",
-        url: `http://localhost:${PORT}/metadata`,
+        url: publicUrl("/metadata") || `http://localhost:${PORT}/metadata`,
         accessedAt: generatedAt,
       },
     ],
@@ -682,6 +693,7 @@ function serviceMetadata(service) {
     name: service.name,
     endpoint: service.endpoint,
     endpointPath: service.path,
+    ...(publicUrl(service.path) ? { endpointUrl: publicUrl(service.path) } : {}),
     description: service.description,
     pricingReady: PAYMENT_MODE !== "demo",
     paymentIntegration: PAYMENT_MODE,
@@ -700,6 +712,7 @@ function metadata() {
       version: SERVICE_VERSION,
       serviceType: "A2MCP",
       paymentMode: PAYMENT_MODE,
+      ...(PUBLIC_BASE_URL ? { publicBaseUrl: PUBLIC_BASE_URL } : {}),
       strategy: "One shared data/payment layer with multiple separately listable A2MCP endpoints.",
     },
     services: Object.values(SERVICE_CATALOG).map(serviceMetadata),
