@@ -16,6 +16,7 @@ const X402_AMOUNT_MINIMAL = process.env.X402_AMOUNT_MINIMAL || "20000";
 const X402_TOKEN_NAME = process.env.X402_TOKEN_NAME || "USD\u20ae0";
 const X402_TOKEN_SYMBOL = process.env.X402_TOKEN_SYMBOL || "USDT0";
 const X402_TOKEN_VERSION = process.env.X402_TOKEN_VERSION || "1";
+const PLACEHOLDER_PAY_TO = "0x0000000000000000000000000000000000000001";
 
 function normalizePublicBaseUrl(value) {
   const normalized = String(value || "").trim().replace(/\/+$/, "");
@@ -826,6 +827,12 @@ function createFacilitator() {
     const missing = required.filter((key) => !process.env[key]);
     if (missing.length > 0) {
       throw new Error(`PAYMENT_MODE=okx-x402 requires env vars: ${missing.join(", ")}`);
+    }
+    if (!/^0x[a-fA-F0-9]{40}$/.test(X402_PAY_TO) || X402_PAY_TO === PLACEHOLDER_PAY_TO) {
+      throw new Error("PAYMENT_MODE=okx-x402 requires a real EVM receiving address in X402_PAY_TO.");
+    }
+    if (!/^[1-9][0-9]*$/.test(X402_AMOUNT_MINIMAL)) {
+      throw new Error("PAYMENT_MODE=okx-x402 requires a positive integer X402_AMOUNT_MINIMAL.");
     }
 
     return new OKXFacilitatorClient({
