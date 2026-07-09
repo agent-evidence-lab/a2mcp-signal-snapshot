@@ -128,6 +128,14 @@ const SERVICE_CATALOG = {
   },
 };
 
+const MCP_SERVICE = {
+  id: "mcp-tool-router",
+  name: "A2MCP Tool Router",
+  path: "/mcp",
+  endpoint: "mcp_tools",
+  description: "MCP-compatible JSON-RPC tool router for the A2MCP intelligence suite.",
+};
+
 function jsonResponse(res, status, body) {
   return res.status(status).json(body);
 }
@@ -714,6 +722,8 @@ function metadata() {
       serviceType: "A2MCP",
       paymentMode: PAYMENT_MODE,
       ...(PUBLIC_BASE_URL ? { publicBaseUrl: PUBLIC_BASE_URL } : {}),
+      mcpEndpointPath: MCP_SERVICE.path,
+      ...(publicUrl(MCP_SERVICE.path) ? { mcpEndpointUrl: publicUrl(MCP_SERVICE.path) } : {}),
       strategy: "One shared data/payment layer with multiple separately listable A2MCP endpoints.",
     },
     services: Object.values(SERVICE_CATALOG).map(serviceMetadata),
@@ -890,6 +900,19 @@ function createPaymentGuard() {
       unpaidResponseBody: unpaidResponse(service),
     };
   }
+  routes[`POST ${MCP_SERVICE.path}`] = {
+    accepts: {
+      scheme: "exact",
+      network: X402_NETWORK,
+      payTo: X402_PAY_TO,
+      price: paymentPrice(),
+      maxTimeoutSeconds: 300,
+    },
+    resource: MCP_SERVICE.path,
+    description: MCP_SERVICE.description,
+    mimeType: "application/json",
+    unpaidResponseBody: unpaidResponse(MCP_SERVICE),
+  };
 
   return paymentMiddleware(routes, resourceServer, {
     appName: SUITE_NAME,
@@ -910,6 +933,138 @@ function invalidInput(res, details) {
 
 function asyncRoute(handler) {
   return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
+}
+
+function mcpTools() {
+  return Object.values(SERVICE_CATALOG).map((service) => ({
+    name: service.endpoint,
+    title: service.name,
+    description: service.description,
+    inputSchema: service.inputSchema,
+    outputSchema: {
+      type: "object",
+      description: `${service.name} structured JSON response.`,
+    },
+  }));
+}
+
+function findMcpService(name) {
+  const normalized = normalizeString(name);
+  return Object.values(SERVICE_CATALOG).find(
+    (service) => service.endpoint === normalized || service.id === normalized || service.name === normalized,
+  );
+}
+
+function mcpError(id, code, message, data) {
+  return {
+    jsonrpc: "2.0",
+    id,
+    error: {
+      code,
+      message,
+      ...(data ? { data } : {}),
+    },
+  };
+}
+
+async function executeMcpTool(service, args) {
+  if (service.id === SERVICE_CATALOG.tokenRisk.id) {
+    const normalized = validateTokenInput(args || {});
+    if (!normalized.ok) {
+      const error = new Error("Invalid input for token_risk_scan.");
+      error.data = normalized.errors;
+      throw error;
+    }
+    return buildTokenRiskScan(normalized.value);
+  }
+
+  if (service.id === SERVICE_CATALOG.apeGuard.id) {
+    const normalized = validateTokenInput(args || {}, { allowMode: true });
+    if (!normalized.ok) {
+      const error = new Error("Invalid input for ape_pretrade_check.");
+      error.data = normalized.errors;
+      throw error;
+    }
+    return buildApeGuard(normalized.value);
+  }
+
+  if (service.id === SERVICE_CATALOG.signalSnapshot.id) {
+    const normalized = normalizeSignalInput(args || {});
+    if (!normalized.ok) {
+      const error = new Error("Invalid input for signal_snapshot.");
+      error.data = normalized.errors;
+      throw error;
+    }
+    return buildSnapshot(normalized.value);
+  }
+
+  throw new Error(`Unsupported MCP service: ${service.id}`);
+}
+
+async function handleMcpRequest(message) {
+  const id = message?.id ?? null;
+  const method = normalizeString(message?.method);
+
+  if (!message || message.jsonrpc !== "2.0" || !method) {
+    return mcpError(id, -32600, "Invalid JSON-RPC request.");
+  }
+
+  if (method === "initialize") {
+    return {
+      jsonrpc: "2.0",
+      id,
+      result: {
+        protocolVersion: "2025-06-18",
+        capabilities: {
+          tools: {},
+        },
+        serverInfo: {
+          name: SUITE_NAME,
+          version: SERVICE_VERSION,
+        },
+      },
+    };
+  }
+
+  if (method === "tools/list") {
+    return {
+      jsonrpc: "2.0",
+      id,
+      result: {
+        tools: mcpTools(),
+      },
+    };
+  }
+
+  if (method === "tools/call") {
+    const service = findMcpService(message.params?.name);
+    if (!service) {
+      return mcpError(id, -32602, "Unknown tool.", {
+        availableTools: mcpTools().map((tool) => tool.name),
+      });
+    }
+
+    try {
+      const result = await executeMcpTool(service, message.params?.arguments || {});
+      return {
+        jsonrpc: "2.0",
+        id,
+        result: {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result),
+            },
+          ],
+          structuredContent: result,
+        },
+      };
+    } catch (error) {
+      return mcpError(id, -32602, error.message, error.data);
+    }
+  }
+
+  return mcpError(id, -32601, "Method not found.");
 }
 
 const app = express();
@@ -945,11 +1100,32 @@ app.get("/health", (req, res) => jsonResponse(res, 200, {
 
 app.get("/metadata", (req, res) => jsonResponse(res, 200, metadata()));
 
+app.get("/mcp", (req, res) => jsonResponse(res, 200, {
+  ok: true,
+  service: {
+    id: MCP_SERVICE.id,
+    name: MCP_SERVICE.name,
+    version: SERVICE_VERSION,
+    serviceType: "A2MCP",
+    paymentMode: PAYMENT_MODE,
+  },
+  endpointPath: MCP_SERVICE.path,
+  ...(publicUrl(MCP_SERVICE.path) ? { endpointUrl: publicUrl(MCP_SERVICE.path) } : {}),
+  tools: mcpTools(),
+  jsonRpcMethods: ["initialize", "tools/list", "tools/call"],
+}));
+
 app.get("/openapi.json", (req, res) => {
   const protocol = req.protocol;
   const host = req.get("host") || `localhost:${PORT}`;
   return jsonResponse(res, 200, openapi(`${protocol}://${host}`));
 });
+
+app.post("/mcp", asyncRoute(async (req, res) => {
+  const messages = Array.isArray(req.body) ? req.body : [req.body];
+  const responses = await Promise.all(messages.map(handleMcpRequest));
+  return jsonResponse(res, 200, Array.isArray(req.body) ? responses : responses[0]);
+}));
 
 app.post(SERVICE_CATALOG.tokenRisk.path, asyncRoute(async (req, res) => {
   const normalized = validateTokenInput(req.body || {});

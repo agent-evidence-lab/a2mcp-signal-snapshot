@@ -62,6 +62,12 @@ async function main() {
   const metadataBody = await metadata.json();
   console.log("GET /metadata", metadata.status, metadataBody);
   assert(metadataBody.services?.length >= 3, "Metadata should expose multiple A2MCP services.");
+  assert(metadataBody.suite?.mcpEndpointPath === "/mcp", "Metadata should expose the MCP endpoint.");
+
+  const mcpInfo = await fetch(`${baseUrl}/mcp`);
+  const mcpInfoBody = await mcpInfo.json();
+  console.log("GET /mcp", mcpInfo.status, mcpInfoBody);
+  assert(mcpInfoBody.tools?.length >= 3, "MCP endpoint should expose tools.");
 
   const tokenBody = {
     chain: "solana",
@@ -73,6 +79,17 @@ async function main() {
   assert(typeof tokenRisk.risk_score === "number", "Token Risk Guard should return risk_score.");
   assert(tokenRisk.risk_level, "Token Risk Guard should return risk_level.");
   assert(tokenRisk.data_quality, "Token Risk Guard should return data_quality.");
+
+  const mcpToolCall = await postJson("/mcp", {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "tools/call",
+    params: {
+      name: "token_risk_scan",
+      arguments: tokenBody,
+    },
+  });
+  assert(mcpToolCall.result?.structuredContent?.risk_score !== undefined, "MCP tools/call should return structuredContent.");
 
   const apeGuard = await postJson("/api/ape-pretrade-check", {
     ...tokenBody,

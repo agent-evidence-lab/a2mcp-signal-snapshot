@@ -28,6 +28,7 @@ Then call:
 ```bash
 curl -s http://localhost:8787/health
 curl -s http://localhost:8787/metadata
+curl -s http://localhost:8787/mcp
 curl -s http://localhost:8787/openapi.json
 ```
 
@@ -71,6 +72,26 @@ curl -s -X POST http://localhost:8787/api/signal-snapshot \
   }'
 ```
 
+MCP-style tool call:
+
+```bash
+curl -s -X POST http://localhost:8787/mcp \
+  -H 'content-type: application/json' \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "token_risk_scan",
+      "arguments": {
+        "chain": "solana",
+        "token_address": "So11111111111111111111111111111111111111112",
+        "language": "zh-CN"
+      }
+    }
+  }'
+```
+
 ## One-command Tests
 
 The smoke tests start and stop a local server automatically.
@@ -97,6 +118,10 @@ Then test any endpoint:
 onchainos agent x402-check \
   --endpoint http://localhost:8788/api/token-risk-scan \
   --body '{"chain":"solana","token_address":"So11111111111111111111111111111111111111112"}'
+
+onchainos agent x402-check \
+  --endpoint http://localhost:8788/mcp \
+  --body '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 ```
 
 ## Production x402 Mode
@@ -147,6 +172,12 @@ Endpoint:
 
 ```text
 https://<your-domain>/api/token-risk-scan
+```
+
+MCP endpoint:
+
+```text
+https://<your-domain>/mcp
 ```
 
 ApeGuard:

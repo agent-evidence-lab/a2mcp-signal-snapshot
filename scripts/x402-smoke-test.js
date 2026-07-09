@@ -7,6 +7,11 @@ const baseUrl = process.env.A2MCP_BASE_URL || `http://localhost:${port}`;
 let child;
 
 const endpointBodies = [
+  ["/mcp", {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "tools/list",
+  }],
   ["/api/token-risk-scan", {
     chain: "solana",
     token_address: "So11111111111111111111111111111111111111112",
