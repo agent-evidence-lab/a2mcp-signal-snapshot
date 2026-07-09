@@ -5,8 +5,8 @@ import { paymentMiddleware, x402ResourceServer } from "@okxweb3/x402-express";
 import { ExactEvmScheme } from "@okxweb3/x402-evm/exact/server";
 
 const PORT = Number(process.env.PORT || 8787);
-const SERVICE_NAME = "Web3 Signal Snapshot";
-const SERVICE_VERSION = "0.1.0";
+const SUITE_NAME = "Mario A2MCP Intelligence Suite";
+const SERVICE_VERSION = "0.2.0";
 const PAYMENT_MODE = process.env.PAYMENT_MODE || "demo";
 const X402_NETWORK = process.env.X402_NETWORK || "eip155:196";
 const X402_PRICE = process.env.X402_PRICE || "$0.02";
@@ -34,7 +34,87 @@ const SUPPORTED_CHAINS = new Set([
   "polygon",
 ]);
 
-const SUPPORTED_MODES = new Set(["token", "wallet", "project", "risk"]);
+const SIGNAL_MODES = new Set(["token", "wallet", "project", "risk"]);
+const APE_MODES = new Set(["quick", "deep"]);
+
+const tokenInputSchema = {
+  type: "object",
+  required: ["chain", "token_address"],
+  properties: {
+    chain: { type: "string", enum: Array.from(SUPPORTED_CHAINS) },
+    token_address: { type: "string", description: "Token contract address or Solana mint address." },
+    language: { type: "string", default: "zh-CN" },
+  },
+};
+
+const apeInputSchema = {
+  type: "object",
+  required: ["chain", "token_address"],
+  properties: {
+    chain: { type: "string", enum: Array.from(SUPPORTED_CHAINS) },
+    token_address: { type: "string", description: "Token contract address or Solana mint address." },
+    mode: { type: "string", enum: Array.from(APE_MODES), default: "quick" },
+    language: { type: "string", default: "zh-CN" },
+  },
+};
+
+const signalInputSchema = {
+  type: "object",
+  required: ["chain", "address"],
+  properties: {
+    chain: { type: "string", enum: Array.from(SUPPORTED_CHAINS) },
+    address: { type: "string", description: "Token, wallet, contract address, or project slug." },
+    mode: { type: "string", enum: Array.from(SIGNAL_MODES), default: "token" },
+    question: { type: "string", description: "Optional analysis focus." },
+    lookbackHours: { type: "number", minimum: 1, maximum: 720, default: 24 },
+    language: { type: "string", default: "zh-CN" },
+  },
+};
+
+const SERVICE_CATALOG = {
+  tokenRisk: {
+    id: "token-risk-guard",
+    name: "Token Risk Guard",
+    path: "/api/token-risk-scan",
+    endpoint: "token_risk_scan",
+    description: "Structured token risk scan for liquidity, market, concentration-data availability, and contract-data availability.",
+    suggestedFeeUsdt: "0.02",
+    inputSchema: tokenInputSchema,
+    outputGuarantees: [
+      "risk_score and risk_level",
+      "flags, liquidity, holders, contract, suggested_action",
+      "data_quality and source URLs",
+    ],
+  },
+  apeGuard: {
+    id: "apeguard",
+    name: "ApeGuard",
+    path: "/api/ape-pretrade-check",
+    endpoint: "ape_pretrade_check",
+    description: "Pre-trade meme or new-token risk check with short decision hints for downstream agents.",
+    suggestedFeeUsdt: "0.02",
+    inputSchema: apeInputSchema,
+    outputGuarantees: [
+      "ape_score and risk_level",
+      "one_line, red_flags, market_status, decision_hint",
+      "data_quality and source URLs",
+    ],
+  },
+  signalSnapshot: {
+    id: "web3-signal-snapshot",
+    name: "Web3 Signal Snapshot",
+    path: "/api/signal-snapshot",
+    endpoint: "signal_snapshot",
+    description: "General Web3 signal snapshot for tokens, wallets, projects, or risk objects.",
+    suggestedFeeUsdt: "0.02",
+    inputSchema: signalInputSchema,
+    outputGuarantees: [
+      "Structured JSON response",
+      "Request id and timestamp",
+      "Observations, risk flags, suggested next steps, and sources",
+    ],
+  },
+};
 
 function jsonResponse(res, status, body) {
   return res.status(status).json(body);
@@ -45,19 +125,37 @@ function notFound(res) {
     ok: false,
     error: {
       code: "not_found",
-      message: "Unknown endpoint. Try GET /health, GET /metadata, GET /openapi.json, or POST /api/signal-snapshot.",
+      message: `Unknown endpoint. Try GET /health, GET /metadata, GET /openapi.json, or POST ${Object.values(SERVICE_CATALOG).map((service) => service.path).join(", POST ")}.`,
     },
   });
 }
 
-function normalizeInput(input) {
-  const chain = String(input.chain || "").trim().toLowerCase();
-  const mode = String(input.mode || "token").trim().toLowerCase();
-  const subject = String(input.address || input.subject || "").trim();
-  const question = String(input.question || "").trim();
-  const language = String(input.language || "zh-CN").trim();
-  const lookbackHours = Number.isFinite(Number(input.lookbackHours)) ? Number(input.lookbackHours) : 24;
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
 
+function safeNumber(value, fallback = 0) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function normalizeString(value) {
+  return String(value || "").trim();
+}
+
+function normalizeChain(value) {
+  return normalizeString(value).toLowerCase();
+}
+
+function normalizeTokenAddress(input) {
+  return normalizeString(input.token_address || input.tokenAddress || input.address || input.subject);
+}
+
+function validateTokenInput(body, { allowMode = false } = {}) {
+  const chain = normalizeChain(body.chain);
+  const tokenAddress = normalizeTokenAddress(body);
+  const language = normalizeString(body.language || "zh-CN");
+  const mode = normalizeString(body.mode || "quick").toLowerCase();
   const errors = [];
 
   if (!SUPPORTED_CHAINS.has(chain)) {
@@ -67,10 +165,52 @@ function normalizeInput(input) {
     });
   }
 
-  if (!SUPPORTED_MODES.has(mode)) {
+  if (!tokenAddress || tokenAddress.length < 3) {
+    errors.push({
+      field: "token_address",
+      message: "Provide a token contract address or Solana mint address.",
+    });
+  }
+
+  if (allowMode && !APE_MODES.has(mode)) {
     errors.push({
       field: "mode",
-      message: `Unsupported mode. Use one of: ${Array.from(SUPPORTED_MODES).join(", ")}.`,
+      message: `Unsupported mode. Use one of: ${Array.from(APE_MODES).join(", ")}.`,
+    });
+  }
+
+  return {
+    ok: errors.length === 0,
+    errors,
+    value: {
+      chain,
+      token_address: tokenAddress,
+      mode,
+      language,
+    },
+  };
+}
+
+function normalizeSignalInput(input) {
+  const chain = normalizeChain(input.chain);
+  const mode = normalizeString(input.mode || "token").toLowerCase();
+  const subject = normalizeString(input.address || input.subject || input.token_address || input.tokenAddress);
+  const question = normalizeString(input.question);
+  const language = normalizeString(input.language || "zh-CN");
+  const lookbackHours = Number.isFinite(Number(input.lookbackHours)) ? Number(input.lookbackHours) : 24;
+  const errors = [];
+
+  if (!SUPPORTED_CHAINS.has(chain)) {
+    errors.push({
+      field: "chain",
+      message: `Unsupported chain. Use one of: ${Array.from(SUPPORTED_CHAINS).join(", ")}.`,
+    });
+  }
+
+  if (!SIGNAL_MODES.has(mode)) {
+    errors.push({
+      field: "mode",
+      message: `Unsupported mode. Use one of: ${Array.from(SIGNAL_MODES).join(", ")}.`,
     });
   }
 
@@ -102,6 +242,334 @@ function normalizeInput(input) {
   };
 }
 
+function dexScreenerChainIds(chain) {
+  const aliases = {
+    ethereum: ["ethereum", "ether"],
+    bsc: ["bsc", "binance-smart-chain"],
+    base: ["base"],
+    polygon: ["polygon", "polygon-pos"],
+    arbitrum: ["arbitrum", "arbitrum-one"],
+    solana: ["solana"],
+    xlayer: ["xlayer"],
+  };
+  return aliases[chain] || [chain];
+}
+
+async function fetchDexScreenerToken(chain, tokenAddress) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 7000);
+  const url = `https://api.dexscreener.com/latest/dex/tokens/${encodeURIComponent(tokenAddress)}`;
+
+  try {
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        accept: "application/json",
+        "user-agent": `${SUITE_NAME}/${SERVICE_VERSION}`,
+      },
+    });
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        source: url,
+        error: `DexScreener returned HTTP ${response.status}.`,
+        pairs: [],
+      };
+    }
+
+    const payload = await response.json();
+    const allPairs = Array.isArray(payload.pairs) ? payload.pairs : [];
+    const allowed = new Set(dexScreenerChainIds(chain));
+    const chainPairs = allPairs.filter((pair) => allowed.has(String(pair.chainId || "").toLowerCase()));
+    const pairs = chainPairs.length > 0 ? chainPairs : allPairs;
+
+    return {
+      ok: true,
+      source: url,
+      pairs,
+      matchedRequestedChain: chainPairs.length > 0,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      source: url,
+      error: error.name === "AbortError" ? "DexScreener request timed out." : error.message,
+      pairs: [],
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function selectPrimaryPair(pairs) {
+  return [...pairs].sort((left, right) => {
+    return safeNumber(right.liquidity?.usd) - safeNumber(left.liquidity?.usd);
+  })[0];
+}
+
+function pairAgeHours(pair) {
+  const createdAt = safeNumber(pair?.pairCreatedAt);
+  if (!createdAt) return null;
+  return Math.max(0, (Date.now() - createdAt) / 36e5);
+}
+
+function classifyRisk(score) {
+  if (score >= 80) return "critical";
+  if (score >= 60) return "high";
+  if (score >= 35) return "medium";
+  return "low";
+}
+
+function suggestedAction(level) {
+  return {
+    critical: "avoid_or_manual_review",
+    high: "manual_review_required",
+    medium: "proceed_only_with_caution",
+    low: "standard_review_passed",
+  }[level];
+}
+
+function addFlag(flags, code, severity, detail) {
+  flags.push({ code, severity, detail });
+}
+
+function assessTokenRisk(input, market) {
+  const pair = selectPrimaryPair(market.pairs);
+  const flags = [];
+  let score = 10;
+
+  if (!market.ok) {
+    score += 55;
+    addFlag(flags, "data_source_error", "high", market.error || "Primary market data source failed.");
+  }
+
+  if (!pair) {
+    score += 45;
+    addFlag(flags, "market_pair_not_found", "high", "No DEX pair was found for this token in the current data source.");
+  }
+
+  const liquidityUsd = safeNumber(pair?.liquidity?.usd);
+  if (pair) {
+    if (liquidityUsd <= 0) {
+      score += 35;
+      addFlag(flags, "liquidity_unavailable", "high", "Liquidity is missing or zero in the selected DEX pair.");
+    } else if (liquidityUsd < 10000) {
+      score += 35;
+      addFlag(flags, "liquidity_too_low", "high", "Pool liquidity is below 10k USD.");
+    } else if (liquidityUsd < 50000) {
+      score += 25;
+      addFlag(flags, "liquidity_low", "medium", "Pool liquidity is below 50k USD.");
+    } else if (liquidityUsd < 100000) {
+      score += 15;
+      addFlag(flags, "liquidity_thin", "medium", "Pool liquidity is below 100k USD.");
+    }
+
+    const ageHours = pairAgeHours(pair);
+    if (ageHours !== null && ageHours < 24) {
+      score += 20;
+      addFlag(flags, "fresh_pair", "medium", "The selected pair appears to be less than 24 hours old.");
+    } else if (ageHours !== null && ageHours < 168) {
+      score += 10;
+      addFlag(flags, "young_pair", "low", "The selected pair appears to be less than 7 days old.");
+    }
+
+    const change1h = safeNumber(pair.priceChange?.h1);
+    const change24h = safeNumber(pair.priceChange?.h24);
+    if (Math.abs(change1h) >= 50 || Math.abs(change24h) >= 150) {
+      score += 15;
+      addFlag(flags, "extreme_price_move", "medium", "Recent price movement is extreme and may imply high volatility.");
+    }
+
+    const volume24h = safeNumber(pair.volume?.h24);
+    if (liquidityUsd > 0 && volume24h / liquidityUsd > 20) {
+      score += 10;
+      addFlag(flags, "volume_liquidity_churn_high", "medium", "24h volume is very high relative to pool liquidity.");
+    }
+
+    const buys1h = safeNumber(pair.txns?.h1?.buys);
+    const sells1h = safeNumber(pair.txns?.h1?.sells);
+    if (sells1h >= buys1h * 2 && sells1h >= 10) {
+      score += 10;
+      addFlag(flags, "sell_pressure_1h", "medium", "1h sell count is materially higher than buy count.");
+    }
+  }
+
+  addFlag(flags, "holder_data_unavailable", "info", "Holder concentration is not available from this MVP data source.");
+  addFlag(flags, "contract_permission_data_unavailable", "info", "Contract permissions and honeypot checks are not available from this MVP data source.");
+
+  const riskScore = clamp(Math.round(score), 0, 100);
+  const riskLevel = classifyRisk(riskScore);
+  const dataQuality = pair ? (market.matchedRequestedChain ? "medium" : "low") : "low";
+
+  return {
+    riskScore,
+    riskLevel,
+    dataQuality,
+    flags,
+    pair,
+    suggestedAction: suggestedAction(riskLevel),
+  };
+}
+
+function liquidityPayload(pair) {
+  return {
+    available: Boolean(pair),
+    dex: pair?.dexId || null,
+    chain: pair?.chainId || null,
+    pair_address: pair?.pairAddress || null,
+    pair_url: pair?.url || null,
+    pool_liquidity_usd: pair ? safeNumber(pair.liquidity?.usd, null) : null,
+    base_token: pair?.baseToken ? {
+      address: pair.baseToken.address,
+      symbol: pair.baseToken.symbol,
+      name: pair.baseToken.name,
+    } : null,
+    quote_token: pair?.quoteToken ? {
+      address: pair.quoteToken.address,
+      symbol: pair.quoteToken.symbol,
+      name: pair.quoteToken.name,
+    } : null,
+    market_cap_usd: pair ? safeNumber(pair.marketCap, null) : null,
+    fdv_usd: pair ? safeNumber(pair.fdv, null) : null,
+    pair_age_hours: pair ? pairAgeHours(pair) : null,
+  };
+}
+
+function marketStatus(pair) {
+  return {
+    available: Boolean(pair),
+    price_usd: pair?.priceUsd || null,
+    price_change_1h: pair ? safeNumber(pair.priceChange?.h1, null) : null,
+    price_change_6h: pair ? safeNumber(pair.priceChange?.h6, null) : null,
+    price_change_24h: pair ? safeNumber(pair.priceChange?.h24, null) : null,
+    volume_1h_usd: pair ? safeNumber(pair.volume?.h1, null) : null,
+    volume_6h_usd: pair ? safeNumber(pair.volume?.h6, null) : null,
+    volume_24h_usd: pair ? safeNumber(pair.volume?.h24, null) : null,
+    liquidity_usd: pair ? safeNumber(pair.liquidity?.usd, null) : null,
+    txns_1h: pair ? {
+      buys: safeNumber(pair.txns?.h1?.buys, null),
+      sells: safeNumber(pair.txns?.h1?.sells, null),
+    } : null,
+  };
+}
+
+function summarizeTokenRisk(input, assessment) {
+  const pair = assessment.pair;
+  const symbol = pair?.baseToken?.symbol || input.token_address.slice(0, 8);
+  if (!pair) {
+    return `${symbol} 暂未在当前公开 DEX 数据源中找到可用交易对，风险评分偏高，建议人工复核。`;
+  }
+
+  return `${symbol} 当前风险等级为 ${assessment.riskLevel}，主要基于流动性、交易波动、交易对年龄和可用数据完整度评分；holder 与合约权限数据在本 MVP 中标记为未覆盖。`;
+}
+
+async function buildTokenRiskScan(input) {
+  const generatedAt = new Date().toISOString();
+  const market = await fetchDexScreenerToken(input.chain, input.token_address);
+  const assessment = assessTokenRisk(input, market);
+
+  return {
+    ok: true,
+    service: {
+      name: SERVICE_CATALOG.tokenRisk.name,
+      version: SERVICE_VERSION,
+      serviceType: "A2MCP",
+      paymentMode: PAYMENT_MODE,
+    },
+    requestId: randomUUID(),
+    generatedAt,
+    input,
+    risk_score: assessment.riskScore,
+    risk_level: assessment.riskLevel,
+    summary: summarizeTokenRisk(input, assessment),
+    flags: assessment.flags,
+    liquidity: liquidityPayload(assessment.pair),
+    market_status: marketStatus(assessment.pair),
+    holders: {
+      available: false,
+      top_10_percent: null,
+      holder_count: null,
+      reason: "Holder concentration requires an explorer, indexer, or chain-specific data provider and is not inferred here.",
+    },
+    contract: {
+      available: false,
+      verified: null,
+      mintable: null,
+      blacklist_function: null,
+      owner_can_change_tax: null,
+      reason: "Contract permission checks require explorer or security API integration and are not inferred here.",
+    },
+    suggested_action: assessment.suggestedAction,
+    data_quality: assessment.dataQuality,
+    sources: [
+      {
+        name: "DexScreener Token Pairs",
+        url: market.source,
+        accessedAt: generatedAt,
+        status: market.ok ? "ok" : "error",
+      },
+    ],
+    disclaimer: "Informational risk scan only. It is not financial advice and does not execute trades.",
+  };
+}
+
+function apeDecisionHint(riskLevel, apeScore) {
+  if (riskLevel === "critical" || apeScore < 25) return "avoid_or_manual_review";
+  if (riskLevel === "high" || apeScore < 45) return "manual_review_required";
+  if (riskLevel === "medium" || apeScore < 70) return "small_size_or_wait_for_more_data";
+  return "standard_review_passed";
+}
+
+function buildApeLine(riskLevel, apeScore, dataQuality) {
+  if (dataQuality === "low") return "公开数据不足，别急着冲，先人工复核。";
+  if (riskLevel === "critical") return "这个币当前看起来很危险，不适合直接开冲。";
+  if (riskLevel === "high") return "风险偏高，建议先人工复核再考虑。";
+  if (riskLevel === "medium") return "有一些风险点，小仓或继续观察更稳妥。";
+  return `基础风险较低，Ape Score ${apeScore}，但仍需自己确认交易风险。`;
+}
+
+async function buildApeGuard(input) {
+  const risk = await buildTokenRiskScan(input);
+  const redFlags = risk.flags
+    .filter((flag) => flag.severity !== "info")
+    .map((flag) => flag.code);
+
+  const apeScore = clamp(Math.round(100 - risk.risk_score), 0, 100);
+  const decisionHint = apeDecisionHint(risk.risk_level, apeScore);
+
+  return {
+    ok: true,
+    service: {
+      name: SERVICE_CATALOG.apeGuard.name,
+      version: SERVICE_VERSION,
+      serviceType: "A2MCP",
+      paymentMode: PAYMENT_MODE,
+    },
+    requestId: randomUUID(),
+    generatedAt: new Date().toISOString(),
+    input,
+    ape_score: apeScore,
+    risk_level: risk.risk_level,
+    one_line: buildApeLine(risk.risk_level, apeScore, risk.data_quality),
+    red_flags: redFlags,
+    market_status: {
+      ...risk.market_status,
+      pair_age_hours: risk.liquidity.pair_age_hours,
+      pair_url: risk.liquidity.pair_url,
+      note: "First MVP exposes the most reliable fields from the shared token risk engine. More trade-flow fields can be added after an indexer is connected.",
+    },
+    decision_hint: decisionHint,
+    token_risk_ref: {
+      risk_score: risk.risk_score,
+      suggested_action: risk.suggested_action,
+      data_quality: risk.data_quality,
+    },
+    sources: risk.sources,
+    disclaimer: "Risk check only. This is not a buy/sell recommendation and does not execute trades.",
+  };
+}
+
 function buildSnapshot(input) {
   const generatedAt = new Date().toISOString();
   const shortSubject = input.subject.length > 18
@@ -118,7 +586,7 @@ function buildSnapshot(input) {
   return {
     ok: true,
     service: {
-      name: SERVICE_NAME,
+      name: SERVICE_CATALOG.signalSnapshot.name,
       version: SERVICE_VERSION,
       serviceType: "A2MCP",
       dataStatus: "demo",
@@ -127,7 +595,7 @@ function buildSnapshot(input) {
     requestId: randomUUID(),
     generatedAt,
     input,
-    summary: `${modeCopy} ${shortSubject} 的 ${input.lookbackHours} 小时信号快照已生成。当前 MVP 返回结构化分析框架，正式版会接入实时链上/市场/社媒数据源。`,
+    summary: `${modeCopy} ${shortSubject} 的 ${input.lookbackHours} 小时信号快照已生成。当前 endpoint 用于通用研究任务包装；Token 风控请优先调用 /api/token-risk-scan，土狗交易前体检请调用 /api/ape-pretrade-check。`,
     observations: [
       {
         label: "对象识别",
@@ -142,14 +610,14 @@ function buildSnapshot(input) {
       {
         label: "数据接入状态",
         level: "warning",
-        detail: "当前为本地 A2MCP endpoint 形态验证；mock-x402 模式只验证 402 付费墙，不结算真实付款。",
+        detail: "当前通用信号快照为轻量包装；更强的实时风控能力已拆分到 Token Risk Guard 和 ApeGuard。",
       },
     ],
     riskFlags: [
       {
         severity: "medium",
-        title: "未接入实时数据",
-        detail: "正式上架前需要接入可验证数据源，避免返回过期或不可复核的信息。",
+        title: "未接入完整实时数据",
+        detail: "正式上架前需要按服务方向补充可验证数据源，避免返回过期或不可复核的信息。",
       },
       {
         severity: "low",
@@ -158,19 +626,19 @@ function buildSnapshot(input) {
       },
     ],
     suggestedNextSteps: [
-      "接入 OKX / OnchainOS / 第三方只读数据源。",
-      "增加来源链接、时间戳、置信度和失败原因字段。",
-      "部署到公网 HTTPS endpoint。",
-      "切换到 okx-x402 模式并配置真实 OKX facilitator 凭证后再注册为付费 A2MCP 服务。",
+      "需要交易前风控时调用 /api/token-risk-scan。",
+      "需要 meme/token 开冲前体检时调用 /api/ape-pretrade-check。",
+      "接入更多只读链上、市场、社媒和事件数据源。",
+      "切换到 okx-x402 模式并配置真实收款地址后再注册为付费 A2MCP 服务。",
     ],
     sources: [
       {
-        name: "Local A2MCP MVP",
+        name: "Local A2MCP Suite",
         url: `http://localhost:${PORT}/metadata`,
         accessedAt: generatedAt,
       },
     ],
-    disclaimer: "This demo is for endpoint validation only and is not financial advice.",
+    disclaimer: "This endpoint is informational only and is not financial advice.",
   };
 }
 
@@ -208,80 +676,84 @@ function pricing() {
   };
 }
 
+function serviceMetadata(service) {
+  return {
+    id: service.id,
+    name: service.name,
+    endpoint: service.endpoint,
+    endpointPath: service.path,
+    description: service.description,
+    pricingReady: PAYMENT_MODE !== "demo",
+    paymentIntegration: PAYMENT_MODE,
+    suggestedFeeUsdt: service.suggestedFeeUsdt,
+    x402: pricing(),
+    inputSchema: service.inputSchema,
+    outputGuarantees: service.outputGuarantees,
+  };
+}
+
 function metadata() {
   return {
     ok: true,
-    service: {
-      name: SERVICE_NAME,
+    suite: {
+      name: SUITE_NAME,
       version: SERVICE_VERSION,
       serviceType: "A2MCP",
-      pricingReady: PAYMENT_MODE !== "demo",
-      paymentIntegration: PAYMENT_MODE,
-      suggestedFeeUsdt: X402_PRICE.replace(/^\$/, ""),
-      endpointPath: "/api/signal-snapshot",
-      x402: pricing(),
+      paymentMode: PAYMENT_MODE,
+      strategy: "One shared data/payment layer with multiple separately listable A2MCP endpoints.",
     },
-    inputSchema: {
-      type: "object",
-      required: ["chain", "address"],
-      properties: {
-        chain: { type: "string", enum: Array.from(SUPPORTED_CHAINS) },
-        address: { type: "string", description: "Token, wallet, contract address, or project slug." },
-        mode: { type: "string", enum: Array.from(SUPPORTED_MODES), default: "token" },
-        question: { type: "string", description: "Optional analysis focus." },
-        lookbackHours: { type: "number", minimum: 1, maximum: 720, default: 24 },
-        language: { type: "string", default: "zh-CN" },
-      },
-    },
-    outputGuarantees: [
-      "Structured JSON response",
-      "Request id and timestamp",
-      "Observations, risk flags, suggested next steps, and sources",
-    ],
+    services: Object.values(SERVICE_CATALOG).map(serviceMetadata),
+    defaultService: SERVICE_CATALOG.tokenRisk.id,
+    inputSchema: SERVICE_CATALOG.tokenRisk.inputSchema,
   };
 }
 
 function openapi(baseUrl) {
+  const paths = {
+    "/health": {
+      get: {
+        summary: "Health check",
+        responses: { "200": { description: "Service is healthy." } },
+      },
+    },
+    "/metadata": {
+      get: {
+        summary: "Suite metadata and service schemas",
+        responses: { "200": { description: "A2MCP suite metadata." } },
+      },
+    },
+  };
+
+  for (const service of Object.values(SERVICE_CATALOG)) {
+    paths[service.path] = {
+      post: {
+        summary: service.description,
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: service.inputSchema,
+            },
+          },
+        },
+        responses: {
+          "200": { description: `Structured response from ${service.name}.` },
+          "400": { description: "Invalid input." },
+          "402": { description: "Payment required in x402 modes." },
+        },
+      },
+    };
+  }
+
   return {
     openapi: "3.1.0",
     info: {
-      title: SERVICE_NAME,
+      title: SUITE_NAME,
       version: SERVICE_VERSION,
-      description: "A2MCP-style Web3 signal snapshot endpoint.",
+      description: "A2MCP-style Web3 intelligence suite with token risk and pre-trade endpoints.",
     },
     servers: [{ url: baseUrl }],
-    paths: {
-      "/health": {
-        get: {
-          summary: "Health check",
-          responses: { "200": { description: "Service is healthy." } },
-        },
-      },
-      "/metadata": {
-        get: {
-          summary: "Service metadata and schema",
-          responses: { "200": { description: "A2MCP service metadata." } },
-        },
-      },
-      "/api/signal-snapshot": {
-        post: {
-          summary: "Create a Web3 signal snapshot",
-          requestBody: {
-            required: true,
-            content: {
-              "application/json": {
-                schema: metadata().inputSchema,
-              },
-            },
-          },
-          responses: {
-            "200": { description: "Structured signal snapshot after payment or in demo mode." },
-            "400": { description: "Invalid input." },
-            "402": { description: "Payment required in x402 modes." },
-          },
-        },
-      },
-    },
+    paths,
   };
 }
 
@@ -355,14 +827,36 @@ function createFacilitator() {
   throw new Error(`Unsupported PAYMENT_MODE: ${PAYMENT_MODE}`);
 }
 
+function unpaidResponse(service) {
+  return () => ({
+    contentType: "application/json",
+    body: {
+      ok: false,
+      error: {
+        code: "payment_required",
+        message: "Payment is required. Decode the PAYMENT-REQUIRED header and retry with a valid x402 payment payload.",
+      },
+      service: {
+        id: service.id,
+        name: service.name,
+        version: SERVICE_VERSION,
+        serviceType: "A2MCP",
+        paymentMode: PAYMENT_MODE,
+      },
+      pricing: pricing(),
+    },
+  });
+}
+
 function createPaymentGuard() {
   const resourceServer = new x402ResourceServer(createFacilitator()).register(
     X402_NETWORK,
     new ExactEvmScheme(),
   );
 
-  const routes = {
-    "POST /api/signal-snapshot": {
+  const routes = {};
+  for (const service of Object.values(SERVICE_CATALOG)) {
+    routes[`POST ${service.path}`] = {
       accepts: {
         scheme: "exact",
         network: X402_NETWORK,
@@ -370,33 +864,32 @@ function createPaymentGuard() {
         price: paymentPrice(),
         maxTimeoutSeconds: 300,
       },
-      resource: "/api/signal-snapshot",
-      description: "Structured Web3 signal snapshot with observations, risk flags, next steps, and sources.",
+      resource: service.path,
+      description: service.description,
       mimeType: "application/json",
-      unpaidResponseBody: () => ({
-        contentType: "application/json",
-        body: {
-          ok: false,
-          error: {
-            code: "payment_required",
-            message: "Payment is required. Decode the PAYMENT-REQUIRED header and retry with a valid x402 payment payload.",
-          },
-          service: {
-            name: SERVICE_NAME,
-            version: SERVICE_VERSION,
-            serviceType: "A2MCP",
-            paymentMode: PAYMENT_MODE,
-          },
-          pricing: pricing(),
-        },
-      }),
-    },
-  };
+      unpaidResponseBody: unpaidResponse(service),
+    };
+  }
 
   return paymentMiddleware(routes, resourceServer, {
-    appName: SERVICE_NAME,
+    appName: SUITE_NAME,
     testnet: false,
   });
+}
+
+function invalidInput(res, details) {
+  return jsonResponse(res, 400, {
+    ok: false,
+    error: {
+      code: "invalid_input",
+      message: "Input did not satisfy the service schema.",
+      details,
+    },
+  });
+}
+
+function asyncRoute(handler) {
+  return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
 }
 
 const app = express();
@@ -423,10 +916,11 @@ if (PAYMENT_MODE !== "demo") {
 
 app.get("/health", (req, res) => jsonResponse(res, 200, {
   ok: true,
-  service: SERVICE_NAME,
+  suite: SUITE_NAME,
   status: "healthy",
   time: new Date().toISOString(),
   paymentMode: PAYMENT_MODE,
+  services: Object.values(SERVICE_CATALOG).map((service) => service.id),
 }));
 
 app.get("/metadata", (req, res) => jsonResponse(res, 200, metadata()));
@@ -437,19 +931,21 @@ app.get("/openapi.json", (req, res) => {
   return jsonResponse(res, 200, openapi(`${protocol}://${host}`));
 });
 
-app.post("/api/signal-snapshot", (req, res) => {
-  const normalized = normalizeInput(req.body || {});
-  if (!normalized.ok) {
-    return jsonResponse(res, 400, {
-      ok: false,
-      error: {
-        code: "invalid_input",
-        message: "Input did not satisfy the service schema.",
-        details: normalized.errors,
-      },
-    });
-  }
+app.post(SERVICE_CATALOG.tokenRisk.path, asyncRoute(async (req, res) => {
+  const normalized = validateTokenInput(req.body || {});
+  if (!normalized.ok) return invalidInput(res, normalized.errors);
+  return jsonResponse(res, 200, await buildTokenRiskScan(normalized.value));
+}));
 
+app.post(SERVICE_CATALOG.apeGuard.path, asyncRoute(async (req, res) => {
+  const normalized = validateTokenInput(req.body || {}, { allowMode: true });
+  if (!normalized.ok) return invalidInput(res, normalized.errors);
+  return jsonResponse(res, 200, await buildApeGuard(normalized.value));
+}));
+
+app.post(SERVICE_CATALOG.signalSnapshot.path, (req, res) => {
+  const normalized = normalizeSignalInput(req.body || {});
+  if (!normalized.ok) return invalidInput(res, normalized.errors);
   return jsonResponse(res, 200, buildSnapshot(normalized.value));
 });
 
@@ -471,5 +967,5 @@ app.use((error, req, res, next) => {
 app.use((req, res) => notFound(res));
 
 app.listen(PORT, () => {
-  console.log(`${SERVICE_NAME} listening on http://localhost:${PORT} (paymentMode=${PAYMENT_MODE})`);
+  console.log(`${SUITE_NAME} listening on http://localhost:${PORT} (paymentMode=${PAYMENT_MODE})`);
 });
