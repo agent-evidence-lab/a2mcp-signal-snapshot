@@ -1,0 +1,22 @@
+{
+  "name": "a2mcp-signal-snapshot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A local A2MCP-style demo endpoint for structured Web3 signal snapshots.",
+  "scripts": {
+    "start": "node src/server.js",
+    "start:mock-x402": "PAYMENT_MODE=mock-x402 node src/server.js",
+    "test": "node scripts/smoke-test.js",
+    "test:x402": "node scripts/x402-smoke-test.js"
+  },
+  "engines": {
+    "node": ">=22.14.0"
+  },
+  "dependencies": {
+    "@okxweb3/x402-core": "^0.1.0",
+    "@okxweb3/x402-evm": "^0.2.1",
+    "@okxweb3/x402-express": "^0.1.1",
+    "express": "^5.2.1"
+  }
+}

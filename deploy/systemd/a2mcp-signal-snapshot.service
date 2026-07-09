@@ -1,0 +1,16 @@
+[Unit]
+Description=A2MCP Signal Snapshot service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/a2mcp-signal-snapshot
+EnvironmentFile=/etc/a2mcp-signal-snapshot.env
+ExecStart=/usr/bin/env node src/server.js
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+
+[Install]
+WantedBy=multi-user.target
