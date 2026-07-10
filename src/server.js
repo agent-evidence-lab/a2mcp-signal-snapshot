@@ -845,13 +845,17 @@ function createFacilitator() {
       throw new Error("PAYMENT_MODE=okx-x402 requires a positive integer X402_AMOUNT_MINIMAL.");
     }
 
-    return new OKXFacilitatorClient({
+    const facilitatorConfig = {
       apiKey: process.env.OKX_API_KEY,
       secretKey: process.env.OKX_SECRET_KEY,
       passphrase: process.env.OKX_PASSPHRASE,
-      baseUrl: process.env.OKX_FACILITATOR_BASE_URL,
       syncSettle: process.env.X402_SYNC_SETTLE === "1",
-    });
+    };
+    if (process.env.OKX_FACILITATOR_BASE_URL) {
+      facilitatorConfig.baseUrl = process.env.OKX_FACILITATOR_BASE_URL;
+    }
+
+    return new OKXFacilitatorClient(facilitatorConfig);
   }
 
   throw new Error(`Unsupported PAYMENT_MODE: ${PAYMENT_MODE}`);
