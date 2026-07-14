@@ -63,6 +63,22 @@ async function main() {
   console.log("GET /metadata", metadata.status, metadataBody);
   assert(metadataBody.services?.length >= 3, "Metadata should expose multiple A2MCP services.");
   assert(metadataBody.suite?.mcpEndpointPath === "/mcp", "Metadata should expose the MCP endpoint.");
+  assert(
+    metadataBody.suite?.name === "Codex Evidence Lab A2MCP Suite",
+    "Metadata should use the same product identity as the marketplace Agent.",
+  );
+  assert(
+    metadataBody.services.every((service) => service.suggestedFeeUsdt === "0.01"),
+    "Displayed service fees should match the default x402 payment challenge.",
+  );
+  assert(
+    metadataBody.services[0]?.description.includes("DexScreener"),
+    "Token Risk Guard metadata should name its actual data source.",
+  );
+  assert(
+    metadataBody.services[0]?.outputGuarantees.some((item) => item.includes("unavailable")),
+    "Token Risk Guard metadata should disclose unsupported risk fields.",
+  );
 
   const mcpInfo = await fetch(`${baseUrl}/mcp`);
   const mcpInfoBody = await mcpInfo.json();

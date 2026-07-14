@@ -5,14 +5,14 @@ import { paymentMiddleware, x402ResourceServer } from "@okxweb3/x402-express";
 import { ExactEvmScheme } from "@okxweb3/x402-evm/exact/server";
 
 const PORT = Number(process.env.PORT || 8787);
-const SUITE_NAME = "Mario A2MCP Intelligence Suite";
-const SERVICE_VERSION = "0.2.0";
+const SUITE_NAME = process.env.SUITE_NAME || "Codex Evidence Lab A2MCP Suite";
+const SERVICE_VERSION = "0.2.1";
 const PAYMENT_MODE = process.env.PAYMENT_MODE || "demo";
 const X402_NETWORK = process.env.X402_NETWORK || "eip155:196";
-const X402_PRICE = process.env.X402_PRICE || "$0.02";
+const X402_PRICE = process.env.X402_PRICE || "$0.01";
 const X402_PAY_TO = process.env.X402_PAY_TO || "0x0000000000000000000000000000000000000001";
 const X402_ASSET = process.env.X402_ASSET || "0x779ded0c9e1022225f8e0630b35a9b54be713736";
-const X402_AMOUNT_MINIMAL = process.env.X402_AMOUNT_MINIMAL || "20000";
+const X402_AMOUNT_MINIMAL = process.env.X402_AMOUNT_MINIMAL || "10000";
 const X402_TOKEN_NAME = process.env.X402_TOKEN_NAME || "USD\u20ae0";
 const X402_TOKEN_SYMBOL = process.env.X402_TOKEN_SYMBOL || "USDT0";
 const X402_TOKEN_VERSION = process.env.X402_TOKEN_VERSION || "1";
@@ -35,6 +35,7 @@ function normalizeDecimals(value) {
 }
 
 const X402_TOKEN_DECIMALS = normalizeDecimals(process.env.X402_TOKEN_DECIMALS || 6);
+const X402_SUGGESTED_FEE_USDT = X402_PRICE.replace(/^\$/, "");
 
 const SUPPORTED_CHAINS = new Set([
   "solana",
@@ -89,12 +90,13 @@ const SERVICE_CATALOG = {
     name: "Token Risk Guard",
     path: "/api/token-risk-scan",
     endpoint: "token_risk_scan",
-    description: "Structured token risk scan for liquidity, market, concentration-data availability, and contract-data availability.",
-    suggestedFeeUsdt: "0.02",
+    description: "DexScreener-based token scan for liquidity, price, volume, pair age, and transaction activity. Holder concentration, contract permissions, and honeypot checks are reported as unavailable.",
+    suggestedFeeUsdt: X402_SUGGESTED_FEE_USDT,
     inputSchema: tokenInputSchema,
     outputGuarantees: [
       "risk_score and risk_level",
-      "flags, liquidity, holders, contract, suggested_action",
+      "flags, liquidity, market activity, and suggested_action",
+      "holders and contract fields explicitly marked unavailable until dedicated providers are connected",
       "data_quality and source URLs",
     ],
   },
@@ -103,8 +105,8 @@ const SERVICE_CATALOG = {
     name: "ApeGuard",
     path: "/api/ape-pretrade-check",
     endpoint: "ape_pretrade_check",
-    description: "Pre-trade meme or new-token risk check with short decision hints for downstream agents.",
-    suggestedFeeUsdt: "0.02",
+    description: "DexScreener-based pre-trade meme or new-token check using liquidity, price, volume, pair age, and transaction activity.",
+    suggestedFeeUsdt: X402_SUGGESTED_FEE_USDT,
     inputSchema: apeInputSchema,
     outputGuarantees: [
       "ape_score and risk_level",
@@ -117,8 +119,8 @@ const SERVICE_CATALOG = {
     name: "Web3 Signal Snapshot",
     path: "/api/signal-snapshot",
     endpoint: "signal_snapshot",
-    description: "General Web3 signal snapshot for tokens, wallets, projects, or risk objects.",
-    suggestedFeeUsdt: "0.02",
+    description: "Lightweight DexScreener-backed signal snapshot. Token mode has market data; wallet and project modes disclose that chain-native data is not connected.",
+    suggestedFeeUsdt: X402_SUGGESTED_FEE_USDT,
     inputSchema: signalInputSchema,
     outputGuarantees: [
       "Structured JSON response",
