@@ -7,7 +7,9 @@
   "scripts": {
     "start": "node src/server.js",
     "start:mock-x402": "PAYMENT_MODE=mock-x402 node src/server.js",
-    "test": "node scripts/smoke-test.js",
+    "test:unit": "node --test test/*.test.js",
+    "test:smoke": "node scripts/smoke-test.js",
+    "test": "npm run test:unit && npm run test:smoke",
     "test:facilitator-config": "node scripts/facilitator-config-test.js",
     "test:x402": "node scripts/x402-smoke-test.js"
   },
