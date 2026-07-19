@@ -24,6 +24,37 @@ function deepFreeze(value) {
   return value;
 }
 
+function createReadonlyMap(entries) {
+  const map = new Map(entries);
+  const readonly = {
+    get size() {
+      return map.size;
+    },
+    get(key) {
+      return map.get(key);
+    },
+    has(key) {
+      return map.has(key);
+    },
+    entries() {
+      return map.entries();
+    },
+    keys() {
+      return map.keys();
+    },
+    values() {
+      return map.values();
+    },
+    forEach(callback, thisArg) {
+      map.forEach((value, key) => callback.call(thisArg, value, key, readonly));
+    },
+    [Symbol.iterator]() {
+      return map[Symbol.iterator]();
+    },
+  };
+  return Object.freeze(readonly);
+}
+
 function createInputSchema(properties = {}, chains = MARKET_CHAINS) {
   return deepFreeze({
     type: "object",
@@ -194,12 +225,13 @@ export const LEGACY_PATHS = deepFreeze({
   "/api/signal-snapshot": "token-market-snapshot",
 });
 
-export const SERVICE_BY_ID = new Map(API_SERVICES.map((service) => [service.id, service]));
+const serviceById = new Map(API_SERVICES.map((service) => [service.id, service]));
+export const SERVICE_BY_ID = createReadonlyMap(serviceById);
 
-export const SERVICE_BY_PATH = new Map(API_SERVICES.map((service) => [service.path, service]));
-for (const [path, id] of Object.entries(LEGACY_PATHS)) {
-  SERVICE_BY_PATH.set(path, SERVICE_BY_ID.get(id));
-}
+export const SERVICE_BY_PATH = createReadonlyMap([
+  ...API_SERVICES.map((service) => [service.path, service]),
+  ...Object.entries(LEGACY_PATHS).map(([path, id]) => [path, serviceById.get(id)]),
+]);
 
 export function feeToMinimal(fee, decimals) {
   if (typeof fee !== "string" || !/^\d+(?:\.\d+)?$/.test(fee)) {
@@ -210,13 +242,18 @@ export function feeToMinimal(fee, decimals) {
   }
 
   const [whole, fraction = ""] = fee.split(".");
+  let fractionalDigits = fraction;
   if (fraction.length > decimals) {
-    throw new RangeError(`fee has more than ${decimals} decimal places`);
+    const excessPrecision = fraction.slice(decimals);
+    if (/[1-9]/.test(excessPrecision)) {
+      throw new RangeError(`fee has non-zero precision beyond ${decimals} decimal places`);
+    }
+    fractionalDigits = fraction.slice(0, decimals);
   }
 
   const scale = 10n ** BigInt(decimals);
-  const fractionalMinimal = fraction.length > 0
-    ? BigInt(fraction.padEnd(decimals, "0"))
+  const fractionalMinimal = fractionalDigits.length > 0
+    ? BigInt(fractionalDigits.padEnd(decimals, "0"))
     : 0n;
   return (BigInt(whole) * scale + fractionalMinimal).toString();
 }

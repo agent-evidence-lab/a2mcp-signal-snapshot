@@ -100,18 +100,21 @@ test("service-specific optional inputs are represented in their schemas", () => 
   assert.equal(anomalyProperties.anomaly_threshold.type, "number");
 });
 
-test("security and holder services disclose EVM-only coverage", () => {
+test("security and composite services declare exact approved chain coverage", () => {
+  const evmSecurityChains = ["ethereum", "bsc", "polygon", "arbitrum", "base", "xlayer"];
+  const marketChains = ["solana", "ethereum", "xlayer", "base", "bsc", "arbitrum", "polygon"];
+
   for (const id of ["contract-tax-check", "holder-concentration-check"]) {
     const service = SERVICE_BY_ID.get(id);
     assert.equal(service.securityCoverage, "EVM-only");
-    assert.ok(service.supportedSecurityChains.length > 0);
-    assert.deepEqual(service.inputSchema.properties.chain.enum, service.supportedSecurityChains);
-    assert.ok(!service.supportedSecurityChains.includes("solana"));
+    assert.deepEqual(service.supportedSecurityChains, evmSecurityChains);
+    assert.deepEqual(service.inputSchema.properties.chain.enum, evmSecurityChains);
   }
 
   const pretrade = SERVICE_BY_ID.get("pretrade-risk-report");
   assert.equal(pretrade.securityCoverage, "EVM-only; market coverage is multi-chain");
-  assert.ok(pretrade.supportedSecurityChains.length > 0);
+  assert.deepEqual(pretrade.supportedSecurityChains, evmSecurityChains);
+  assert.deepEqual(pretrade.inputSchema.properties.chain.enum, marketChains);
 });
 
 test("canonical and legacy paths resolve to canonical service objects", () => {
@@ -131,12 +134,40 @@ test("canonical and legacy paths resolve to canonical service objects", () => {
   }
 });
 
+test("service indexes expose read-only map behavior", () => {
+  assert.equal(SERVICE_BY_ID.size, 8);
+  assert.equal(SERVICE_BY_PATH.size, 11);
+  assert.equal(SERVICE_BY_ID.has("token-market-snapshot"), true);
+  assert.equal(SERVICE_BY_PATH.has("/api/token-risk-scan"), true);
+  assert.deepEqual(
+    Array.from(SERVICE_BY_ID, ([id, service]) => [id, service.id]),
+    expectedServices.map(([id]) => [id, id]),
+  );
+  assert.deepEqual(
+    Array.from(SERVICE_BY_PATH, ([path]) => path),
+    [...expectedServices.map(([, , path]) => path), ...Object.keys(LEGACY_PATHS)],
+  );
+
+  for (const index of [SERVICE_BY_ID, SERVICE_BY_PATH]) {
+    assert.equal(Object.isFrozen(index), true);
+    assert.equal(index.set, undefined);
+    assert.equal(index.delete, undefined);
+    assert.equal(index.clear, undefined);
+  }
+
+  assert.throws(() => SERVICE_BY_ID.set("replacement", API_SERVICES[0]), { name: "TypeError" });
+  assert.equal(SERVICE_BY_ID.get("token-market-snapshot"), API_SERVICES[0]);
+  assert.equal(SERVICE_BY_PATH.get("/api/token-risk-scan").id, "pretrade-risk-report");
+});
+
 test("decimal service fees convert to exact token amounts", () => {
   assert.equal(feeToMinimal("0.01", 6), "10000");
   assert.equal(feeToMinimal("0.02", 6), "20000");
   assert.equal(feeToMinimal("0.03", 6), "30000");
   assert.equal(feeToMinimal("12", 0), "12");
   assert.equal(feeToMinimal("12.340", 3), "12340");
+  assert.equal(feeToMinimal("1.20", 1), "12");
+  assert.equal(feeToMinimal("1.2000", 1), "12");
 });
 
 test("fee conversion rejects invalid, negative, and over-precision inputs", () => {
@@ -145,7 +176,7 @@ test("fee conversion rejects invalid, negative, and over-precision inputs", () =
   }
 
   assert.throws(() => feeToMinimal("0.0000001", 6), { name: "RangeError" });
-  assert.throws(() => feeToMinimal("1.20", 1), { name: "RangeError" });
+  assert.throws(() => feeToMinimal("1.21", 1), { name: "RangeError" });
 
   for (const decimals of [-1, 1.5, "6", Number.NaN]) {
     assert.throws(() => feeToMinimal("0.01", decimals), { name: "RangeError" });
