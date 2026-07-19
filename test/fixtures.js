@@ -1,3 +1,13 @@
+export const evmTokenAddress = "0xEa51801b8F5B88543DdaD3D1727400c15b209D8f";
+export const evmTokenAddressLower = evmTokenAddress.toLowerCase();
+export const solanaTokenAddress = "So11111111111111111111111111111111111111112";
+export const solanaCaseVariantAddress = "so11111111111111111111111111111111111111112";
+export const geckoQuoteTokenAddress = "0xA0b86991c6218b36c1d19d4a2e9eb0cE3606eB48";
+export const geckoQuoteTokenAddressLower = geckoQuoteTokenAddress.toLowerCase();
+
+const geckoTokenId = `eth_${evmTokenAddressLower}`;
+const geckoQuoteTokenId = `eth_${geckoQuoteTokenAddressLower}`;
+
 export const dexPairs = [
   {
     chainId: "ethereum",
@@ -5,7 +15,7 @@ export const dexPairs = [
     url: "https://dexscreener.com/ethereum/0xpair-low",
     pairAddress: "0xpair-low",
     labels: ["v2"],
-    baseToken: { address: "0xAbC", name: "Alpha Token", symbol: "ALP" },
+    baseToken: { address: evmTokenAddress, name: "Alpha Token", symbol: "ALP" },
     quoteToken: { address: "0xUsdc", name: "USD Coin", symbol: "USDC" },
     priceNative: "0.0005",
     priceUsd: "1.25",
@@ -28,7 +38,7 @@ export const dexPairs = [
     url: "https://dexscreener.com/ethereum/0xpair-primary",
     pairAddress: "0xpair-primary",
     labels: ["v3"],
-    baseToken: { address: "0xAbC", name: "Alpha Token", symbol: "ALP" },
+    baseToken: { address: evmTokenAddress, name: "Alpha Token", symbol: "ALP" },
     quoteToken: { address: "0xWeth", name: "Wrapped Ether", symbol: "WETH" },
     priceNative: "0.00051",
     priceUsd: "1.275",
@@ -50,7 +60,7 @@ export const dexPairs = [
     dexId: "unknown-dex",
     url: "https://dexscreener.com/ethereum/0xpair-unknown-liquidity",
     pairAddress: "0xpair-unknown-liquidity",
-    baseToken: { address: "0xAbC", name: "Alpha Token", symbol: "ALP" },
+    baseToken: { address: evmTokenAddress, name: "Alpha Token", symbol: "ALP" },
     quoteToken: { address: "0xQuote", name: "Quote Token", symbol: "QUOTE" },
     priceNative: "",
     priceUsd: null,
@@ -83,6 +93,8 @@ export const geckoPools = {
         base_token_price_usd: "1.26",
         base_token_price_native_currency: "0.000504",
         quote_token_price_usd: "1",
+        quote_token_price_native_currency: "0.0004",
+        token_price_usd: "1.26",
         reserve_in_usd: "20000",
         volume_usd: { m5: "40", h1: "400", h6: "2400", h24: "9600" },
         price_change_percentage: { m5: "0.1", h1: "0.5", h6: "1.5", h24: "3" },
@@ -95,7 +107,7 @@ export const geckoPools = {
         pool_created_at: "2024-01-01T00:00:00Z",
       },
       relationships: {
-        base_token: { data: { id: "eth_0xabc", type: "token" } },
+        base_token: { data: { id: geckoTokenId, type: "token" } },
         quote_token: { data: { id: "eth_0xusdc", type: "token" } },
         dex: { data: { id: "sushiswap", type: "dex" } },
       },
@@ -109,6 +121,8 @@ export const geckoPools = {
         base_token_price_usd: "1.27",
         base_token_price_native_currency: "0.000508",
         quote_token_price_usd: "2500",
+        quote_token_price_native_currency: "1",
+        token_price_usd: "1.27",
         reserve_in_usd: "90000",
         volume_usd: { m5: "120", h1: "1200", h6: "7200", h24: "28800" },
         price_change_percentage: { m5: "0.2", h1: "0.8", h6: "2.4", h24: "4.8" },
@@ -121,7 +135,7 @@ export const geckoPools = {
         pool_created_at: "2024-02-01T00:00:00Z",
       },
       relationships: {
-        base_token: { data: { id: "eth_0xabc", type: "token" } },
+        base_token: { data: { id: geckoTokenId, type: "token" } },
         quote_token: { data: { id: "eth_0xweth", type: "token" } },
         dex: { data: { id: "uniswap-v3", type: "dex" } },
       },
@@ -129,9 +143,9 @@ export const geckoPools = {
   ],
   included: [
     {
-      id: "eth_0xabc",
+      id: geckoTokenId,
       type: "token",
-      attributes: { address: "0xAbC", name: "Alpha Token", symbol: "ALP" },
+      attributes: { address: evmTokenAddress, name: "Alpha Token", symbol: "ALP" },
     },
     {
       id: "eth_0xusdc",
@@ -148,11 +162,53 @@ export const geckoPools = {
   ],
 };
 
+export const geckoQuoteTokenPools = {
+  data: [
+    {
+      id: "eth_0xpool-quote-token",
+      type: "pool",
+      attributes: {
+        address: "0xpool-quote-token",
+        name: "ALP / USDC",
+        base_token_price_usd: "2.50",
+        base_token_price_native_currency: "0.001",
+        quote_token_price_usd: "1.00",
+        quote_token_price_native_currency: "0.0004",
+        token_price_usd: "1.01",
+        reserve_in_usd: "75000",
+        volume_usd: { h1: "900", h24: "21600" },
+        price_change_percentage: { h1: "0.3", h24: "1.2" },
+        transactions: { h1: { buys: 7, sells: 5, buyers: 6, sellers: 5 } },
+        fdv_usd: "50000000",
+        market_cap_usd: "49000000",
+        pool_created_at: "2024-03-01T00:00:00Z",
+      },
+      relationships: {
+        base_token: { data: { id: geckoTokenId, type: "token" } },
+        quote_token: { data: { id: geckoQuoteTokenId, type: "token" } },
+        dex: { data: { id: "uniswap-v3", type: "dex" } },
+      },
+    },
+  ],
+  included: [
+    {
+      id: geckoTokenId,
+      type: "token",
+      attributes: { address: evmTokenAddress, name: "Alpha Token", symbol: "ALP" },
+    },
+    {
+      id: geckoQuoteTokenId,
+      type: "token",
+      attributes: { address: geckoQuoteTokenAddress, name: "USD Coin", symbol: "USDC" },
+    },
+  ],
+};
+
 export const goPlusToken = {
   code: 1,
   message: "OK",
   result: {
-    "0xAbC": {
+    [evmTokenAddress]: {
       token_name: "Alpha Token",
       token_symbol: "ALP",
       total_supply: "1000000",

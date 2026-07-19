@@ -33,11 +33,19 @@ const marketChainSet = new Set(MARKET_CHAINS);
 const DEXSCREENER_API_BASE = "https://api.dexscreener.com/token-pairs/v1";
 const GECKOTERMINAL_ACCEPT = "application/json;version=20230302";
 const GOPLUS_API_BASE = "https://api.gopluslabs.io/api/v1/token_security";
+const EVM_ADDRESS_PATTERN = /^0x[0-9a-f]{40}$/i;
+const SOLANA_ADDRESS_PATTERN = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 
-function codedError(message, code) {
-  const error = new Error(message);
+function codedError(message, code, cause) {
+  const error = cause === undefined ? new Error(message) : new Error(message, { cause });
   error.code = code;
   return error;
+}
+
+function providerEnvelopeCause(providerCode, message) {
+  const cause = new Error(message);
+  cause.providerCode = providerCode;
+  return cause;
 }
 
 function isTimeoutError(error) {
@@ -54,21 +62,31 @@ function isTimeoutError(error) {
 
 function normalizeUpstreamError(error) {
   return isTimeoutError(error)
-    ? codedError("Upstream request timed out", "UPSTREAM_TIMEOUT")
-    : codedError("Upstream request failed", "UPSTREAM_FAILURE");
+    ? codedError("Upstream request timed out", "UPSTREAM_TIMEOUT", error)
+    : codedError("Upstream request failed", "UPSTREAM_FAILURE", error);
+}
+
+function normalizeChainName(chain) {
+  const normalized = typeof chain === "string" ? chain.trim().toLowerCase() : "";
+  if (!normalized) throw codedError("Chain is required", "INVALID_INPUT");
+  return normalized;
 }
 
 function normalizeChain(chain) {
-  const normalized = typeof chain === "string" ? chain.trim().toLowerCase() : "";
+  const normalized = normalizeChainName(chain);
   if (!marketChainSet.has(normalized)) {
     throw codedError("Unsupported market chain", "INVALID_INPUT");
   }
   return normalized;
 }
 
-function normalizeAddress(tokenAddress) {
+function normalizeAddress(chain, tokenAddress) {
   const normalized = typeof tokenAddress === "string" ? tokenAddress.trim() : "";
   if (!normalized) throw codedError("Token address is required", "INVALID_INPUT");
+  const isValid = chain === "solana"
+    ? SOLANA_ADDRESS_PATTERN.test(normalized)
+    : EVM_ADDRESS_PATTERN.test(normalized);
+  if (!isValid) throw codedError("Token address is invalid for this chain", "INVALID_INPUT");
   return normalized;
 }
 
@@ -149,12 +167,35 @@ function normalizePair(pair, { chain, source, sourceUrl, accessedAt, url }) {
   };
 }
 
+function isUsablePair(pair) {
+  return Boolean(pair.pairAddress)
+    && Number.isFinite(pair.liquidity.usd)
+    && pair.liquidity.usd > 0;
+}
+
 function selectPrimaryPair(pairs) {
   return pairs
-    .filter((pair) => pair.pairAddress && Number.isFinite(pair.liquidity.usd))
+    .filter(isUsablePair)
     .reduce((best, pair) => (
       best === null || pair.liquidity.usd > best.liquidity.usd ? pair : best
     ), null);
+}
+
+function sourceEvidence(source, sourceUrl, accessedAt, pairs) {
+  const usablePairCount = pairs.filter(isUsablePair).length;
+  const names = {
+    dexscreener: "DexScreener Token Pairs",
+    geckoterminal: "GeckoTerminal Top Pools",
+  };
+  return {
+    source,
+    name: names[source],
+    url: sourceUrl,
+    accessedAt,
+    status: usablePairCount > 0 ? "ok" : pairs.length === 0 ? "empty" : "unusable",
+    pairCount: pairs.length,
+    usablePairCount,
+  };
 }
 
 function normalizeDexMarket(payload, { chain, tokenAddress, sourceUrl, accessedAt }) {
@@ -176,6 +217,7 @@ function normalizeDexMarket(payload, { chain, tokenAddress, sourceUrl, accessedA
     accessedAt,
     pairs,
     primaryPair: selectPrimaryPair(pairs),
+    sources: [sourceEvidence("dexscreener", sourceUrl, accessedAt, pairs)],
   };
 }
 
@@ -185,9 +227,28 @@ function includedResource(payload, relationship) {
   return payload.included.find((item) => item?.id === id) ?? null;
 }
 
-function geckoToken(payload, relationship) {
+function relationshipAddress(relationship, networkId) {
+  const id = stringOrNull(relationship?.data?.id);
+  if (!id) return null;
+  const prefix = `${networkId}_`;
+  if (id.startsWith(prefix)) return id.slice(prefix.length);
+  const separator = id.indexOf("_");
+  return separator >= 0 ? id.slice(separator + 1) : null;
+}
+
+function geckoToken(payload, relationship, networkId) {
   const resource = includedResource(payload, relationship);
-  return normalizeToken(resource?.attributes);
+  return normalizeToken({
+    ...resource?.attributes,
+    address: resource?.attributes?.address ?? relationshipAddress(relationship, networkId),
+  });
+}
+
+function addressesEqual(chain, first, second) {
+  if (!first || !second) return false;
+  return chain === "solana"
+    ? first === second
+    : first.toLowerCase() === second.toLowerCase();
 }
 
 function geckoPoolUrl(networkId, pairAddress) {
@@ -207,14 +268,25 @@ function normalizeGeckoMarket(payload, {
     const attributes = pool?.attributes ?? {};
     const pairAddress = stringOrNull(attributes.address);
     const pairCreatedAt = Date.parse(attributes.pool_created_at);
+    const poolBaseToken = geckoToken(payload, pool?.relationships?.base_token, networkId);
+    const poolQuoteToken = geckoToken(payload, pool?.relationships?.quote_token, networkId);
+    const requestedTokenIsQuote = addressesEqual(
+      chain,
+      poolQuoteToken.address,
+      tokenAddress,
+    );
     return normalizePair({
       chainId: chain,
       dexId: pool?.relationships?.dex?.data?.id,
       pairAddress,
-      baseToken: geckoToken(payload, pool?.relationships?.base_token),
-      quoteToken: geckoToken(payload, pool?.relationships?.quote_token),
-      priceNative: attributes.base_token_price_native_currency,
-      priceUsd: attributes.base_token_price_usd,
+      baseToken: requestedTokenIsQuote ? poolQuoteToken : poolBaseToken,
+      quoteToken: requestedTokenIsQuote ? poolBaseToken : poolQuoteToken,
+      priceNative: requestedTokenIsQuote
+        ? attributes.quote_token_price_native_currency
+        : attributes.base_token_price_native_currency,
+      priceUsd: attributes.token_price_usd ?? (requestedTokenIsQuote
+        ? attributes.quote_token_price_usd
+        : attributes.base_token_price_usd),
       priceChange: attributes.price_change_percentage,
       volume: attributes.volume_usd,
       txns: attributes.transactions,
@@ -239,6 +311,7 @@ function normalizeGeckoMarket(payload, {
     accessedAt,
     pairs,
     primaryPair: selectPrimaryPair(pairs),
+    sources: [sourceEvidence("geckoterminal", sourceUrl, accessedAt, pairs)],
   };
 }
 
@@ -255,7 +328,47 @@ function normalizeHolder(holder) {
 }
 
 function normalizeHolderArray(holders) {
-  return Array.isArray(holders) ? holders.map(normalizeHolder) : [];
+  if (!Array.isArray(holders)) return null;
+  if (holders.some((holder) => !holder || typeof holder !== "object" || Array.isArray(holder))) {
+    return null;
+  }
+  return holders.map(normalizeHolder);
+}
+
+function validateGoPlusEnvelope(payload) {
+  const providerCode = Number(payload?.code);
+  if (providerCode === 4029) {
+    throw codedError(
+      "Upstream request was rate limited",
+      "UPSTREAM_RATE_LIMITED",
+      providerEnvelopeCause(providerCode, "GoPlus response code 4029"),
+    );
+  }
+  if (providerCode === 2) {
+    throw codedError(
+      "Upstream security data is incomplete",
+      "UPSTREAM_FAILURE",
+      providerEnvelopeCause(providerCode, "GoPlus response code 2"),
+    );
+  }
+  if (providerCode !== 1) {
+    throw codedError(
+      "Upstream security request failed",
+      "UPSTREAM_FAILURE",
+      providerEnvelopeCause(
+        Number.isFinite(providerCode) ? providerCode : null,
+        "GoPlus response did not report complete data",
+      ),
+    );
+  }
+  if (!payload.result || typeof payload.result !== "object" || Array.isArray(payload.result)) {
+    throw codedError(
+      "Upstream security result is invalid",
+      "UPSTREAM_FAILURE",
+      providerEnvelopeCause(providerCode, "GoPlus result is not an object"),
+    );
+  }
+  return payload.result;
 }
 
 function normalizeGoPlusSecurity(value, { chain, tokenAddress, sourceUrl, accessedAt }) {
@@ -337,9 +450,19 @@ export function createProviders({
     }
 
     if (response?.status === 429) {
-      throw codedError("Upstream request was rate limited", "UPSTREAM_RATE_LIMITED");
+      throw codedError(
+        "Upstream request was rate limited",
+        "UPSTREAM_RATE_LIMITED",
+        new Error("Upstream HTTP 429"),
+      );
     }
-    if (!response?.ok) throw codedError("Upstream request failed", "UPSTREAM_FAILURE");
+    if (!response?.ok) {
+      throw codedError(
+        "Upstream request failed",
+        "UPSTREAM_FAILURE",
+        new Error(`Upstream HTTP ${response?.status ?? "unknown"}`),
+      );
+    }
 
     try {
       return await response.json();
@@ -350,10 +473,11 @@ export function createProviders({
 
   async function marketFallback(chain, tokenAddress) {
     const normalizedChain = normalizeChain(chain);
-    const normalizedAddress = normalizeAddress(tokenAddress);
+    const normalizedAddress = normalizeAddress(normalizedChain, tokenAddress);
     const networkId = GECKOTERMINAL_NETWORK_IDS[normalizedChain];
     const sourceUrl = `${normalizedGeckoApiBase}/networks/${encodeURIComponent(networkId)}`
-      + `/tokens/${encodeURIComponent(normalizedAddress)}/pools`;
+      + `/tokens/${encodeURIComponent(normalizedAddress)}/pools`
+      + "?include=base_token,quote_token";
     const payload = await fetchJson(sourceUrl, { Accept: GECKOTERMINAL_ACCEPT });
     return normalizeGeckoMarket(payload, {
       chain: normalizedChain,
@@ -367,7 +491,7 @@ export function createProviders({
   return {
     async market(chain, tokenAddress) {
       const normalizedChain = normalizeChain(chain);
-      const normalizedAddress = normalizeAddress(tokenAddress);
+      const normalizedAddress = normalizeAddress(normalizedChain, tokenAddress);
       const cacheKey = `${normalizedChain}:${cacheAddress(normalizedChain, normalizedAddress)}`;
 
       return marketCache.getOrLoad(cacheKey, marketCacheMs, async () => {
@@ -380,18 +504,30 @@ export function createProviders({
           sourceUrl,
           accessedAt: new Date().toISOString(),
         });
-        return market.primaryPair ? market : marketFallback(normalizedChain, normalizedAddress);
+        if (market.primaryPair) return market;
+
+        const fallbackMarket = await marketFallback(normalizedChain, normalizedAddress);
+        return {
+          ...fallbackMarket,
+          sources: [...market.sources, ...fallbackMarket.sources],
+          fallback: {
+            reason: market.pairs.length === 0
+              ? "dexscreener_empty"
+              : "dexscreener_no_usable_pair",
+            attemptedPairs: market.pairs,
+          },
+        };
       });
     },
 
     marketFallback,
 
     async security(chain, tokenAddress) {
-      const normalizedChain = normalizeChain(chain);
+      const normalizedChain = normalizeChainName(chain);
       if (!isSecurityChainSupported(normalizedChain)) {
         throw codedError("Security data is unavailable for this chain", "SECURITY_CHAIN_UNSUPPORTED");
       }
-      const normalizedAddress = normalizeAddress(tokenAddress);
+      const normalizedAddress = normalizeAddress(normalizedChain, tokenAddress);
       const cacheKey = `${normalizedChain}:${cacheAddress(normalizedChain, normalizedAddress)}`;
 
       return securityCache.getOrLoad(cacheKey, securityCacheMs, async () => {
@@ -401,10 +537,24 @@ export function createProviders({
         const headers = {};
         if (goPlusAccessToken) headers.Authorization = `Bearer ${goPlusAccessToken}`;
         const payload = await fetchJson(sourceUrl, headers);
-        const entry = Object.entries(payload?.result ?? {}).find(
+        const result = validateGoPlusEnvelope(payload);
+        const entry = Object.entries(result).find(
           ([address]) => address.toLowerCase() === normalizedAddress.toLowerCase(),
         );
-        if (!entry) throw codedError("Upstream security result is missing", "UPSTREAM_FAILURE");
+        if (!entry) {
+          throw codedError(
+            "Upstream security result is missing",
+            "UPSTREAM_FAILURE",
+            providerEnvelopeCause(1, "GoPlus result did not include the requested address"),
+          );
+        }
+        if (!entry[1] || typeof entry[1] !== "object" || Array.isArray(entry[1])) {
+          throw codedError(
+            "Upstream security result is invalid",
+            "UPSTREAM_FAILURE",
+            providerEnvelopeCause(1, "GoPlus address result is not an object"),
+          );
+        }
         return normalizeGoPlusSecurity(entry[1], {
           chain: normalizedChain,
           tokenAddress: normalizedAddress,
