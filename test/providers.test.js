@@ -1,0 +1,538 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { createTtlCache } from "../src/intelligence/cache.js";
+import {
+  GECKOTERMINAL_NETWORK_IDS,
+  GOPLUS_CHAIN_IDS,
+  MARKET_CHAINS,
+  createProviders,
+  isSecurityChainSupported,
+} from "../src/intelligence/providers.js";
+import {
+  dexPairs,
+  dexPairsWithoutUsableLiquidity,
+  geckoPools,
+  goPlusToken,
+} from "./fixtures.js";
+
+function jsonResponse(body, status = 200) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => body,
+  };
+}
+
+test("ttl cache reuses a value before expiry", async () => {
+  let currentTime = 1_000;
+  let calls = 0;
+  const cache = createTtlCache({ maxEntries: 4, now: () => currentTime });
+
+  const first = await cache.getOrLoad("token", 1_000, async () => ++calls);
+  currentTime = 1_999;
+  const second = await cache.getOrLoad("token", 1_000, async () => ++calls);
+
+  assert.equal(first, 1);
+  assert.equal(second, 1);
+  assert.equal(calls, 1);
+});
+
+test("ttl cache reloads a value at expiry", async () => {
+  let currentTime = 1_000;
+  let calls = 0;
+  const cache = createTtlCache({ now: () => currentTime });
+
+  assert.equal(await cache.getOrLoad("token", 1_000, async () => ++calls), 1);
+  currentTime = 2_000;
+  assert.equal(await cache.getOrLoad("token", 1_000, async () => ++calls), 2);
+  assert.equal(calls, 2);
+});
+
+test("ttl cache evicts the oldest entry when bounded", async () => {
+  const calls = new Map();
+  const cache = createTtlCache({ maxEntries: 2 });
+  const load = (key) => cache.getOrLoad(key, 1_000, async () => {
+    const count = (calls.get(key) ?? 0) + 1;
+    calls.set(key, count);
+    return `${key}-${count}`;
+  });
+
+  assert.equal(await load("oldest"), "oldest-1");
+  assert.equal(await load("middle"), "middle-1");
+  assert.equal(await load("newest"), "newest-1");
+  assert.equal(await load("middle"), "middle-1");
+  assert.equal(await load("oldest"), "oldest-2");
+});
+
+test("ttl cache does not retain failed loads", async () => {
+  let calls = 0;
+  const cache = createTtlCache();
+
+  await assert.rejects(
+    cache.getOrLoad("token", 1_000, async () => {
+      calls += 1;
+      throw new Error("temporary failure");
+    }),
+    /temporary failure/,
+  );
+
+  assert.equal(await cache.getOrLoad("token", 1_000, async () => ++calls), 2);
+  assert.equal(calls, 2);
+});
+
+test("ttl cache de-duplicates concurrent loads for one key", async () => {
+  let calls = 0;
+  let release;
+  const pendingValue = new Promise((resolve) => {
+    release = resolve;
+  });
+  const cache = createTtlCache();
+  const loader = async () => {
+    calls += 1;
+    return pendingValue;
+  };
+
+  const first = cache.getOrLoad("token", 1_000, loader);
+  const second = cache.getOrLoad("token", 1_000, loader);
+  await Promise.resolve();
+
+  assert.equal(calls, 1);
+  release({ value: 42 });
+  const [firstValue, secondValue] = await Promise.all([first, second]);
+  assert.equal(firstValue, secondValue);
+  assert.deepEqual(firstValue, { value: 42 });
+});
+
+test("providers expose the exact market and upstream chain maps", () => {
+  assert.deepEqual(MARKET_CHAINS, [
+    "solana",
+    "ethereum",
+    "xlayer",
+    "base",
+    "bsc",
+    "arbitrum",
+    "polygon",
+  ]);
+  assert.deepEqual(GOPLUS_CHAIN_IDS, {
+    ethereum: 1,
+    bsc: 56,
+    polygon: 137,
+    arbitrum: 42161,
+    base: 8453,
+    xlayer: 196,
+  });
+  assert.deepEqual(GECKOTERMINAL_NETWORK_IDS, {
+    solana: "solana",
+    ethereum: "eth",
+    xlayer: "x-layer",
+    base: "base",
+    bsc: "bsc",
+    arbitrum: "arbitrum",
+    polygon: "polygon_pos",
+  });
+  assert.equal(isSecurityChainSupported("ethereum"), true);
+  assert.equal(isSecurityChainSupported(" Ethereum "), true);
+  assert.equal(isSecurityChainSupported("solana"), false);
+});
+
+test("market rejects invalid chains and empty addresses before fetch", async () => {
+  let fetchCalls = 0;
+  const providers = createProviders({
+    fetchImpl: async () => {
+      fetchCalls += 1;
+      throw new Error("must not fetch");
+    },
+  });
+
+  await assert.rejects(providers.market("avalanche", "0xabc"), { code: "INVALID_INPUT" });
+  await assert.rejects(providers.market("ethereum", "  "), { code: "INVALID_INPUT" });
+  assert.equal(fetchCalls, 0);
+});
+
+test("security rejects unsupported chains before fetch", async () => {
+  let fetchCalls = 0;
+  const providers = createProviders({
+    fetchImpl: async () => {
+      fetchCalls += 1;
+      throw new Error("must not fetch");
+    },
+  });
+
+  await assert.rejects(providers.security("solana", "So11111111111111111111111111111111111111112"), {
+    code: "SECURITY_CHAIN_UNSUPPORTED",
+  });
+  assert.equal(fetchCalls, 0);
+});
+
+test("market normalizes every DexScreener pair and selects numeric peak liquidity", async () => {
+  const calls = [];
+  const providers = createProviders({
+    fetchImpl: async (url, options) => {
+      calls.push({ url: String(url), options });
+      assert.equal(String(url).includes("geckoterminal"), false, "fallback must stay unused");
+      return jsonResponse(dexPairs);
+    },
+    marketCacheMs: 30_000,
+  });
+
+  const market = await providers.market(" Ethereum ", " 0xAbC ");
+  const cached = await providers.market("ethereum", "0xabc");
+
+  assert.equal(cached, market);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "https://api.dexscreener.com/token-pairs/v1/ethereum/0xAbC");
+  assert.ok(calls[0].options.signal instanceof AbortSignal);
+  assert.equal(market.chain, "ethereum");
+  assert.equal(market.tokenAddress, "0xAbC");
+  assert.equal(market.source, "dexscreener");
+  assert.equal(market.sourceUrl, calls[0].url);
+  assert.ok(Number.isFinite(Date.parse(market.accessedAt)));
+  assert.equal(market.pairs.length, 3);
+  assert.equal(market.primaryPair.pairAddress, "0xpair-primary");
+  assert.equal(market.primaryPair.chainId, "ethereum");
+  assert.equal(market.primaryPair.dexId, "uniswap");
+  assert.deepEqual(market.primaryPair.labels, ["v3"]);
+  assert.deepEqual(market.primaryPair.baseToken, {
+    address: "0xAbC",
+    name: "Alpha Token",
+    symbol: "ALP",
+  });
+  assert.deepEqual(market.primaryPair.quoteToken, {
+    address: "0xWeth",
+    name: "Wrapped Ether",
+    symbol: "WETH",
+  });
+  assert.equal(market.primaryPair.priceNative, 0.00051);
+  assert.equal(market.primaryPair.priceUsd, 1.275);
+  assert.deepEqual(market.primaryPair.priceChange, { m5: 0.4, h1: 2.1, h6: 3.7, h24: 8.2 });
+  assert.deepEqual(market.primaryPair.volume, { m5: 850, h1: 7_500, h6: 42_000, h24: 125_000 });
+  assert.deepEqual(market.primaryPair.txns.h1, { buys: 35, sells: 20 });
+  assert.deepEqual(market.primaryPair.liquidity, { usd: 250_000.5, base: 98_039.41, quote: 50 });
+  assert.equal(market.primaryPair.marketCap, 1_020_000);
+  assert.equal(market.primaryPair.fdv, 1_275_000);
+  assert.equal(market.primaryPair.pairCreatedAt, 1_710_000_000_000);
+  assert.equal(market.primaryPair.url, "https://dexscreener.com/ethereum/0xpair-primary");
+  assert.equal(market.primaryPair.accessedAt, market.accessedAt);
+  assert.equal(market.primaryPair.sourceUrl, market.sourceUrl);
+  assert.equal(market.pairs[2].liquidity.usd, null);
+});
+
+test("market cache preserves case-sensitive Solana mint identities", async () => {
+  let fetchCalls = 0;
+  const providers = createProviders({
+    fetchImpl: async () => {
+      fetchCalls += 1;
+      return jsonResponse(dexPairs);
+    },
+  });
+
+  await providers.market("solana", "AbC123");
+  await providers.market("solana", "abc123");
+
+  assert.equal(fetchCalls, 2);
+});
+
+test("market uses GeckoTerminal once when DexScreener is empty", async () => {
+  const calls = [];
+  const providers = createProviders({
+    fetchImpl: async (url, options) => {
+      calls.push({ url: String(url), options });
+      return String(url).includes("dexscreener") ? jsonResponse([]) : jsonResponse(geckoPools);
+    },
+  });
+
+  const market = await providers.market("ethereum", "0xabc");
+
+  assert.equal(calls.length, 2);
+  assert.equal(calls.filter(({ url }) => url.includes("geckoterminal")).length, 1);
+  assert.equal(
+    calls[1].url,
+    "https://api.geckoterminal.com/api/v2/networks/eth/tokens/0xabc/pools",
+  );
+  assert.equal(calls[1].options.headers.Accept, "application/json;version=20230302");
+  assert.ok(calls[1].options.signal instanceof AbortSignal);
+  assert.equal(market.source, "geckoterminal");
+  assert.equal(market.pairs.length, 2);
+  assert.equal(market.primaryPair.pairAddress, "0xpool-primary");
+  assert.equal(market.primaryPair.dexId, "uniswap-v3");
+  assert.equal(market.primaryPair.priceUsd, 1.27);
+  assert.deepEqual(market.primaryPair.priceChange, { m5: 0.2, h1: 0.8, h6: 2.4, h24: 4.8 });
+  assert.deepEqual(market.primaryPair.volume, { m5: 120, h1: 1_200, h6: 7_200, h24: 28_800 });
+  assert.deepEqual(market.primaryPair.txns.h1, { buys: 18, sells: 12, buyers: 15, sellers: 10 });
+  assert.deepEqual(market.primaryPair.liquidity, { usd: 90_000, base: null, quote: null });
+  assert.equal(market.primaryPair.marketCap, 1_016_000);
+  assert.equal(market.primaryPair.fdv, 1_270_000);
+  assert.equal(market.primaryPair.pairCreatedAt, Date.parse("2024-02-01T00:00:00Z"));
+  assert.equal(
+    market.primaryPair.url,
+    "https://www.geckoterminal.com/eth/pools/0xpool-primary",
+  );
+  assert.equal(market.primaryPair.sourceUrl, market.sourceUrl);
+});
+
+test("market uses fallback when DexScreener pairs have no numeric liquidity", async () => {
+  let dexCalls = 0;
+  let geckoCalls = 0;
+  const providers = createProviders({
+    fetchImpl: async (url) => {
+      if (String(url).includes("dexscreener")) {
+        dexCalls += 1;
+        return jsonResponse(dexPairsWithoutUsableLiquidity);
+      }
+      geckoCalls += 1;
+      return jsonResponse(geckoPools);
+    },
+  });
+
+  const market = await providers.market("ethereum", "0xabc");
+
+  assert.equal(market.source, "geckoterminal");
+  assert.equal(dexCalls, 1);
+  assert.equal(geckoCalls, 1);
+});
+
+test("market treats a pair without identity as unusable", async () => {
+  const anonymousPair = {
+    ...dexPairs[0],
+    pairAddress: "",
+    liquidity: { ...dexPairs[0].liquidity, usd: "999999" },
+  };
+  const providers = createProviders({
+    fetchImpl: async (url) => (
+      String(url).includes("dexscreener")
+        ? jsonResponse([anonymousPair])
+        : jsonResponse(geckoPools)
+    ),
+  });
+
+  const market = await providers.market("ethereum", "0xabc");
+
+  assert.equal(market.source, "geckoterminal");
+  assert.equal(market.primaryPair.pairAddress, "0xpool-primary");
+});
+
+test("marketFallback is directly testable with official GeckoTerminal network ids", async () => {
+  const calls = [];
+  const providers = createProviders({
+    geckoApiBase: "https://gecko.test/api/v2/",
+    fetchImpl: async (url, options) => {
+      calls.push({ url: String(url), options });
+      return jsonResponse(geckoPools);
+    },
+  });
+
+  const market = await providers.marketFallback("xlayer", "0xAbC");
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, "https://gecko.test/api/v2/networks/x-layer/tokens/0xAbC/pools");
+  assert.equal(calls[0].options.headers.Accept, "application/json;version=20230302");
+  assert.equal(market.chain, "xlayer");
+  assert.equal(market.tokenAddress, "0xAbC");
+  assert.equal(market.source, "geckoterminal");
+});
+
+test("security normalizes GoPlus contract, trading, holder, and unknown fields", async () => {
+  const calls = [];
+  const providers = createProviders({
+    goPlusAccessToken: "",
+    securityCacheMs: 300_000,
+    fetchImpl: async (url, options) => {
+      calls.push({ url: String(url), options });
+      return jsonResponse(goPlusToken);
+    },
+  });
+
+  const security = await providers.security(" Ethereum ", "0xabc");
+  const cached = await providers.security("ethereum", "0xABC");
+
+  assert.equal(cached, security);
+  assert.equal(calls.length, 1);
+  assert.equal(
+    calls[0].url,
+    "https://api.gopluslabs.io/api/v1/token_security/1?contract_addresses=0xabc",
+  );
+  assert.equal(Object.hasOwn(calls[0].options.headers, "Authorization"), false);
+  assert.ok(calls[0].options.signal instanceof AbortSignal);
+  assert.equal(security.chain, "ethereum");
+  assert.equal(security.tokenAddress, "0xabc");
+  assert.equal(security.source, "goplus");
+  assert.equal(security.sourceUrl, calls[0].url);
+  assert.ok(Number.isFinite(Date.parse(security.accessedAt)));
+  assert.equal(security.tokenName, "Alpha Token");
+  assert.equal(security.tokenSymbol, "ALP");
+  assert.equal(security.totalSupply, "1000000");
+  assert.equal(security.isOpenSource, true);
+  assert.equal(security.isProxy, false);
+  assert.equal(security.isMintable, null);
+  assert.equal(security.canTakeBackOwnership, false);
+  assert.equal(security.ownerChangeBalance, null);
+  assert.equal(security.hiddenOwner, null);
+  assert.equal(security.selfDestruct, false);
+  assert.equal(security.externalCall, true);
+  assert.equal(security.gasAbuse, false);
+  assert.equal(security.buyTax, 0.035);
+  assert.equal(security.sellTax, null);
+  assert.equal(security.cannotBuy, false);
+  assert.equal(security.cannotSellAll, true);
+  assert.equal(security.slippageModifiable, true);
+  assert.equal(security.personalSlippageModifiable, null);
+  assert.equal(security.transferPausable, null);
+  assert.equal(security.tradingCooldown, false);
+  assert.equal(security.isHoneypot, false);
+  assert.equal(security.isBlacklisted, true);
+  assert.equal(security.antiWhale, true);
+  assert.equal(security.antiWhaleModifiable, false);
+  assert.equal(security.holderCount, 187);
+  assert.deepEqual(security.holders, [
+    {
+      address: "0xholder1",
+      tag: "creator",
+      isContract: false,
+      balance: "250000",
+      percent: 0.25,
+      isLocked: false,
+    },
+    {
+      address: "0xholder2",
+      tag: null,
+      isContract: true,
+      balance: "170000",
+      percent: 0.17,
+      isLocked: null,
+    },
+  ]);
+  assert.equal(security.lpHolderCount, 2);
+  assert.equal(security.lpHolders.length, 2);
+  assert.deepEqual(security.lpHolders[0], {
+    address: "0xlp1",
+    tag: "locker",
+    isContract: true,
+    balance: "900",
+    percent: 0.9,
+    isLocked: true,
+  });
+  assert.equal(security.lpHolders[1].isLocked, null);
+  assert.equal(security.ownerAddress, "0xowner");
+  assert.equal(security.ownerBalance, "12345678901234567890.123");
+  assert.equal(security.ownerPercent, 0.125);
+  assert.equal(security.creatorAddress, "0xcreator");
+  assert.equal(security.creatorBalance, null);
+  assert.equal(security.creatorPercent, null);
+});
+
+test("security includes optional GoPlus authorization without exposing it in the URL", async () => {
+  let request;
+  const providers = createProviders({
+    goPlusAccessToken: "top-secret-token",
+    fetchImpl: async (url, options) => {
+      request = { url: String(url), options };
+      return jsonResponse(goPlusToken);
+    },
+  });
+
+  await providers.security("bsc", "0xabc");
+
+  assert.equal(request.options.headers.Authorization, "Bearer top-secret-token");
+  assert.equal(request.url.includes("top-secret-token"), false);
+  assert.equal(request.url.includes("token_security/56"), true);
+});
+
+test("security rejects an empty address before fetch", async () => {
+  let fetchCalls = 0;
+  const providers = createProviders({
+    fetchImpl: async () => {
+      fetchCalls += 1;
+      return jsonResponse(goPlusToken);
+    },
+  });
+
+  await assert.rejects(providers.security("ethereum", ""), { code: "INVALID_INPUT" });
+  assert.equal(fetchCalls, 0);
+});
+
+test("providers normalize 429 responses and retry failed loads", async () => {
+  let calls = 0;
+  const providers = createProviders({
+    fetchImpl: async () => {
+      calls += 1;
+      return calls === 1 ? jsonResponse({ message: "slow down" }, 429) : jsonResponse(dexPairs);
+    },
+  });
+
+  await assert.rejects(providers.market("ethereum", "0xabc"), (error) => {
+    assert.ok(error instanceof Error);
+    assert.equal(error.code, "UPSTREAM_RATE_LIMITED");
+    return true;
+  });
+  const market = await providers.market("ethereum", "0xabc");
+
+  assert.equal(market.primaryPair.pairAddress, "0xpair-primary");
+  assert.equal(calls, 2);
+});
+
+test("providers normalize AbortSignal timeouts", async () => {
+  const providers = createProviders({
+    timeoutMs: 5,
+    fetchImpl: async (_url, options) => new Promise((_resolve, reject) => {
+      options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true });
+    }),
+  });
+
+  await assert.rejects(providers.market("ethereum", "0xabc"), (error) => {
+    assert.ok(error instanceof Error);
+    assert.equal(error.code, "UPSTREAM_TIMEOUT");
+    return true;
+  });
+});
+
+test("providers normalize other HTTP failures without credential leakage", async () => {
+  const credential = "top-secret-token";
+  const providers = createProviders({
+    goPlusAccessToken: credential,
+    fetchImpl: async () => jsonResponse({ message: credential }, 503),
+  });
+
+  await assert.rejects(providers.security("ethereum", "0xabc"), (error) => {
+    assert.equal(error.code, "UPSTREAM_FAILURE");
+    assert.equal(error.message.includes(credential), false);
+    return true;
+  });
+});
+
+test("providers normalize malformed JSON and thrown transport errors", async () => {
+  const invalidJsonProviders = createProviders({
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => {
+        throw new SyntaxError("Unexpected token");
+      },
+    }),
+  });
+  await assert.rejects(invalidJsonProviders.market("ethereum", "0xabc"), {
+    code: "UPSTREAM_FAILURE",
+  });
+
+  const credential = "transport-secret";
+  const failedTransportProviders = createProviders({
+    goPlusAccessToken: credential,
+    fetchImpl: async () => {
+      throw new Error(`socket failed: ${credential}`);
+    },
+  });
+  await assert.rejects(failedTransportProviders.security("ethereum", "0xabc"), (error) => {
+    assert.equal(error.code, "UPSTREAM_FAILURE");
+    assert.equal(error.message.includes(credential), false);
+    return true;
+  });
+});
+
+test("security treats a missing address result as an upstream failure", async () => {
+  const providers = createProviders({
+    fetchImpl: async () => jsonResponse({ code: 1, result: { "0xdef": {} } }),
+  });
+
+  await assert.rejects(providers.security("ethereum", "0xabc"), {
+    code: "UPSTREAM_FAILURE",
+  });
+});
