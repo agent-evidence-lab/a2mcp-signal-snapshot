@@ -6,7 +6,7 @@ import { ExactEvmScheme } from "@okxweb3/x402-evm/exact/server";
 
 const PORT = Number(process.env.PORT || 8787);
 const SUITE_NAME = process.env.SUITE_NAME || "Codex Evidence Lab A2MCP Suite";
-const SERVICE_VERSION = "0.2.1";
+const SERVICE_VERSION = "0.2.2";
 const PAYMENT_MODE = process.env.PAYMENT_MODE || "demo";
 const X402_NETWORK = process.env.X402_NETWORK || "eip155:196";
 const X402_PRICE = process.env.X402_PRICE || "$0.01";
@@ -27,6 +27,10 @@ const PUBLIC_BASE_URL = normalizePublicBaseUrl(process.env.PUBLIC_BASE_URL);
 
 function publicUrl(path) {
   return PUBLIC_BASE_URL ? `${PUBLIC_BASE_URL}${path}` : undefined;
+}
+
+function paymentResource(path) {
+  return publicUrl(path) || path;
 }
 
 function normalizeDecimals(value) {
@@ -900,7 +904,7 @@ function createPaymentGuard() {
         price: paymentPrice(),
         maxTimeoutSeconds: 300,
       },
-      resource: service.path,
+      resource: paymentResource(service.path),
       description: service.description,
       mimeType: "application/json",
       unpaidResponseBody: unpaidResponse(service),
@@ -914,7 +918,7 @@ function createPaymentGuard() {
       price: paymentPrice(),
       maxTimeoutSeconds: 300,
     },
-    resource: MCP_SERVICE.path,
+    resource: paymentResource(MCP_SERVICE.path),
     description: MCP_SERVICE.description,
     mimeType: "application/json",
     unpaidResponseBody: unpaidResponse(MCP_SERVICE),

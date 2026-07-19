@@ -1,6 +1,6 @@
 {
   "name": "a2mcp-signal-snapshot",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "type": "module",
   "description": "A local A2MCP-style Web3 intelligence suite with token risk and pre-trade endpoints.",

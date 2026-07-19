@@ -52,6 +52,7 @@ async function main() {
         ...process.env,
         PORT: port,
         PAYMENT_MODE: "mock-x402",
+        PUBLIC_BASE_URL: baseUrl,
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -83,6 +84,10 @@ async function main() {
 
     if (!requirement?.asset || !requirement?.amount || !requirement?.extra?.decimals) {
       throw new Error("Expected decoded payment requirements to include asset, amount, and token decimals.");
+    }
+
+    if (decoded.resource?.url !== `${baseUrl}${path}`) {
+      throw new Error(`Expected an absolute resource URL for ${path}, got ${decoded.resource?.url}.`);
     }
   }
 }
