@@ -6,17 +6,63 @@ const WINDOWS = Object.freeze(["m5", "h1", "h6", "h24"]);
 const HOUR_MS = 60 * 60 * 1_000;
 const SEVERITY = Object.freeze(["low", "medium", "high", "critical"]);
 
-function numberOrNull(value) {
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
-}
-
 function addWarning(warnings, warning) {
   if (!warnings.includes(warning)) warnings.push(warning);
 }
 
-function analysisOptions(options = {}) {
+function sanitizeOutput(value, warnings) {
+  if (typeof value === "number") {
+    if (Number.isFinite(value)) return value;
+    addWarning(warnings, "invalid_non_finite_numeric");
+    return null;
+  }
+  if (Array.isArray(value)) return value.map((item) => sanitizeOutput(item, warnings));
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => [key, sanitizeOutput(item, warnings)]),
+  );
+}
+
+function numberOrNull(value, warnings = null, { nonNegative = false } = {}) {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    if (warnings) addWarning(warnings, "invalid_non_finite_numeric");
+    return null;
+  }
+  if (nonNegative && value < 0) {
+    if (warnings) addWarning(warnings, "invalid_negative_numeric");
+    return null;
+  }
+  return value;
+}
+
+function safeSum(values, warnings) {
+  if (values.length === 0) return null;
+  let total = 0;
+  for (const value of values) {
+    total += value;
+    if (!Number.isFinite(total)) {
+      addWarning(warnings, "numeric_overflow");
+      return null;
+    }
+  }
+  return total;
+}
+
+function safeRatio(numerator, denominator, warnings) {
+  if (numerator === null || denominator === null || denominator <= 0) return null;
+  const ratio = numerator / denominator;
+  if (!Number.isFinite(ratio)) {
+    addWarning(warnings, "numeric_overflow");
+    return null;
+  }
+  return ratio;
+}
+
+function analysisContext(options = {}) {
   const nowValue = typeof options.now === "function" ? options.now() : Date.now();
   const now = nowValue instanceof Date ? nowValue : new Date(nowValue);
+  if (!Number.isFinite(now.getTime())) throw new RangeError("analysis clock must be a valid date");
   const requestId = typeof options.requestId === "function" ? options.requestId() : randomUUID();
   return { now, requestId };
 }
@@ -26,37 +72,64 @@ function providerWarnings(market) {
   return Array.isArray(warnings) ? [...warnings] : [];
 }
 
-function dataQuality(market, warnings) {
-  const providerQuality = market?.data_quality
+function dataQuality(market, warnings, sources) {
+  const rawProviderQuality = market?.data_quality
     && typeof market.data_quality === "object"
     && !Array.isArray(market.data_quality)
     ? market.data_quality
     : {};
-  const sources = Array.isArray(market?.sources) ? market.sources : [];
+  const providerQuality = sanitizeOutput(rawProviderQuality, warnings);
   const pairs = Array.isArray(market?.pairs) ? market.pairs : [];
+  const sourceStatuses = sources.map((source) => ({
+    source: source?.source ?? "unknown",
+    status: typeof source?.status === "string" ? source.status : "unknown",
+    url: source?.url ?? null,
+  }));
+  for (const source of sourceStatuses) {
+    if (source.status !== "ok") {
+      addWarning(warnings, `source_degraded:${source.source}:${source.status}`);
+    }
+  }
+  if (sourceStatuses.length === 0) addWarning(warnings, "source_provenance_unavailable");
+
+  const fallbackReason = typeof market?.fallback?.reason === "string"
+    ? market.fallback.reason
+    : null;
+  if (market?.fallback) addWarning(warnings, `market_fallback_used:${fallbackReason ?? "unspecified"}`);
+
+  const providerStatus = providerQuality.status ?? providerQuality.provider_status ?? null;
+  const providerDegraded = providerStatus !== null && !["ok", "complete"].includes(providerStatus);
+  const sourceDegraded = sourceStatuses.some((source) => source.status !== "ok");
+  const degraded = warnings.length > 0 || providerDegraded || sourceDegraded || Boolean(market?.fallback);
 
   return {
     ...providerQuality,
-    status: market?.primaryPair ? (warnings.length > 0 ? "partial" : "complete") : "unavailable",
+    status: market?.primaryPair ? (degraded ? "partial" : "complete") : "unavailable",
     pair_count: pairs.length,
     source_count: sources.length,
+    source_statuses: sourceStatuses,
+    fallback: { used: Boolean(market?.fallback), reason: fallbackReason },
     warnings: [...new Set(warnings)],
   };
 }
 
-function envelope(serviceId, input, market, options, warnings) {
+function envelope(serviceId, input, market, context, warnings) {
   const service = SERVICE_BY_ID.get(serviceId);
   if (!service) throw new Error(`Unknown market service: ${serviceId}`);
-  const { now, requestId } = analysisOptions(options);
+  const sanitizedInput = sanitizeOutput(input, warnings);
+  const sanitizedSources = sanitizeOutput(
+    Array.isArray(market?.sources) ? market.sources : [],
+    warnings,
+  );
 
   return {
     ok: true,
     service: { id: service.id, version: VERSION },
-    request_id: requestId,
-    generated_at: now.toISOString(),
-    input: { ...input },
-    data_quality: dataQuality(market, warnings),
-    sources: Array.isArray(market?.sources) ? market.sources.map((source) => ({ ...source })) : [],
+    request_id: context.requestId,
+    generated_at: context.now.toISOString(),
+    input: sanitizedInput,
+    data_quality: dataQuality(market, warnings, sanitizedSources),
+    sources: sanitizedSources,
   };
 }
 
@@ -70,43 +143,51 @@ function primaryPairOf(market) {
     : null;
 }
 
-function observedLiquidity(pairs) {
+function observedLiquidity(pairs, warnings) {
   const values = pairs
-    .map((pair) => numberOrNull(pair?.liquidity?.usd))
-    .filter((value) => value !== null && value >= 0);
-  return values.length > 0 ? values.reduce((sum, value) => sum + value, 0) : null;
+    .map((pair) => numberOrNull(pair?.liquidity?.usd, warnings, { nonNegative: true }))
+    .filter((value) => value !== null);
+  return safeSum(values, warnings);
 }
 
-function primaryLiquidity(market) {
-  const primary = numberOrNull(primaryPairOf(market)?.liquidity?.usd);
-  if (primary !== null && primary >= 0) return primary;
+function primaryLiquidity(market, warnings) {
+  const primary = numberOrNull(
+    primaryPairOf(market)?.liquidity?.usd,
+    warnings,
+    { nonNegative: true },
+  );
+  if (primary !== null) return primary;
   const candidates = pairsOf(market)
-    .map((pair) => numberOrNull(pair?.liquidity?.usd))
-    .filter((value) => value !== null && value >= 0);
+    .map((pair) => numberOrNull(pair?.liquidity?.usd, warnings, { nonNegative: true }))
+    .filter((value) => value !== null);
   return candidates.length > 0 ? Math.max(...candidates) : null;
 }
 
-function transactionWindow(pair, window) {
+function transactionWindow(pair, window, warnings) {
   const values = pair?.txns?.[window];
-  const buys = numberOrNull(values?.buys);
-  const sells = numberOrNull(values?.sells);
-  const total = buys !== null && sells !== null ? buys + sells : null;
+  const buys = numberOrNull(values?.buys, warnings, { nonNegative: true });
+  const sells = numberOrNull(values?.sells, warnings, { nonNegative: true });
+  const total = buys !== null && sells !== null ? safeSum([buys, sells], warnings) : null;
   return {
     buys,
     sells,
     total,
-    buyRatio: total !== null && total > 0 ? buys / total : null,
-    sellRatio: total !== null && total > 0 ? sells / total : null,
+    buyRatio: safeRatio(buys, total, warnings),
+    sellRatio: safeRatio(sells, total, warnings),
   };
 }
 
 function ageHours(pair, now, warnings) {
-  const createdAt = numberOrNull(pair?.pairCreatedAt);
+  const createdAt = numberOrNull(pair?.pairCreatedAt, warnings, { nonNegative: true });
   if (createdAt === null) {
     addWarning(warnings, "pair_created_at_unavailable");
     return null;
   }
   const age = (now.getTime() - createdAt) / HOUR_MS;
+  if (!Number.isFinite(age)) {
+    addWarning(warnings, "numeric_overflow");
+    return null;
+  }
   if (age < 0) {
     addWarning(warnings, "pair_created_at_in_future");
     return 0;
@@ -114,17 +195,20 @@ function ageHours(pair, now, warnings) {
   return age;
 }
 
-function nullableWindows(record) {
-  return Object.fromEntries(WINDOWS.map((window) => [window, numberOrNull(record?.[window])]));
+function nullableWindows(record, warnings, { nonNegative = false } = {}) {
+  return Object.fromEntries(WINDOWS.map((window) => [
+    window,
+    numberOrNull(record?.[window], warnings, { nonNegative }),
+  ]));
 }
 
-function poolSummary(pair) {
+function poolSummary(pair, warnings) {
   return {
     pair_address: pair?.pairAddress ?? null,
     dex_id: pair?.dexId ?? null,
     base_symbol: pair?.baseToken?.symbol ?? null,
     quote_symbol: pair?.quoteToken?.symbol ?? null,
-    liquidity_usd: numberOrNull(pair?.liquidity?.usd),
+    liquidity_usd: numberOrNull(pair?.liquidity?.usd, warnings, { nonNegative: true }),
     url: pair?.url ?? null,
     source: pair?.source ?? null,
   };
@@ -159,26 +243,44 @@ function selectedLookbackWindow(hours) {
 }
 
 export function buildMarketSnapshot(input, market, options = {}) {
+  const context = analysisContext(options);
   const warnings = providerWarnings(market);
   const primary = primaryPairOf(market);
   if (!primary) addWarning(warnings, "primary_pair_unavailable");
-  const { now } = analysisOptions(options);
   const pairs = pairsOf(market);
-  const totalLiquidity = observedLiquidity(pairs);
-  const pairAgeHours = ageHours(primary, now, warnings);
+  const totalLiquidity = observedLiquidity(pairs, warnings);
+  const pairAgeHours = ageHours(primary, context.now, warnings);
   if (totalLiquidity === null) addWarning(warnings, "liquidity_unavailable");
 
   const transactionWindows = Object.fromEntries(WINDOWS.map((window) => {
-    const counts = transactionWindow(primary, window);
+    const counts = transactionWindow(primary, window, warnings);
     return [window, { buys: counts.buys, sells: counts.sells, total: counts.total }];
   }));
   const topPools = pairs
-    .map(poolSummary)
+    .map((pair) => poolSummary(pair, warnings))
     .sort((left, right) => (right.liquidity_usd ?? -1) - (left.liquidity_usd ?? -1))
     .slice(0, 5);
+  const primaryPool = poolSummary(primary, warnings);
+  const price = {
+    usd: numberOrNull(primary?.priceUsd, warnings, { nonNegative: true }),
+    native: numberOrNull(primary?.priceNative, warnings, { nonNegative: true }),
+  };
+  const valuation = {
+    market_cap_usd: numberOrNull(primary?.marketCap, warnings, { nonNegative: true }),
+    fdv_usd: numberOrNull(primary?.fdv, warnings, { nonNegative: true }),
+  };
+  const liquidity = {
+    primary_pool_usd: numberOrNull(primary?.liquidity?.usd, warnings, { nonNegative: true }),
+    observed_total_usd: totalLiquidity,
+  };
+  const priceChanges = nullableWindows(primary?.priceChange, warnings);
+  const volume = nullableWindows(primary?.volume, warnings, { nonNegative: true });
+  const pricedPools = pairs.filter((pair) => (
+    numberOrNull(pair?.priceUsd, warnings, { nonNegative: true }) !== null
+  )).length;
 
   return {
-    ...envelope("token-market-snapshot", input, market, options, warnings),
+    ...envelope("token-market-snapshot", input, market, context, warnings),
     classification: "informational",
     flags: [],
     identity: {
@@ -187,42 +289,36 @@ export function buildMarketSnapshot(input, market, options = {}) {
       name: primary?.baseToken?.name ?? null,
       symbol: primary?.baseToken?.symbol ?? null,
     },
-    primary_pool: poolSummary(primary),
-    price: {
-      usd: numberOrNull(primary?.priceUsd),
-      native: numberOrNull(primary?.priceNative),
-    },
-    valuation: {
-      market_cap_usd: numberOrNull(primary?.marketCap),
-      fdv_usd: numberOrNull(primary?.fdv),
-    },
-    liquidity: {
-      primary_pool_usd: numberOrNull(primary?.liquidity?.usd),
-      observed_total_usd: totalLiquidity,
-    },
-    price_changes: nullableWindows(primary?.priceChange),
-    volume: nullableWindows(primary?.volume),
+    primary_pool: primaryPool,
+    price,
+    valuation,
+    liquidity,
+    price_changes: priceChanges,
+    volume,
     transactions: transactionWindows,
     pair_age_hours: pairAgeHours,
     top_pools: topPools,
     coverage: {
       observed_pools: pairs.length,
-      priced_pools: pairs.filter((pair) => numberOrNull(pair?.priceUsd) !== null).length,
+      priced_pools: pricedPools,
       source_count: Array.isArray(market?.sources) ? market.sources.length : 0,
     },
   };
 }
 
 export function buildLiquidityRisk(input, market, options = {}) {
+  const context = analysisContext(options);
   const warnings = providerWarnings(market);
   const pairs = pairsOf(market);
-  const totalUsd = observedLiquidity(pairs);
-  const primaryUsd = primaryLiquidity(market);
-  const primaryShare = totalUsd !== null && totalUsd > 0 && primaryUsd !== null
-    ? primaryUsd / totalUsd
-    : null;
-  const marketCap = numberOrNull(primaryPairOf(market)?.marketCap);
-  const minLiquidity = numberOrNull(input?.min_liquidity_usd);
+  const totalUsd = observedLiquidity(pairs, warnings);
+  const primaryUsd = primaryLiquidity(market, warnings);
+  const primaryShare = safeRatio(primaryUsd, totalUsd, warnings);
+  const marketCap = numberOrNull(
+    primaryPairOf(market)?.marketCap,
+    warnings,
+    { nonNegative: true },
+  );
+  const minLiquidity = numberOrNull(input?.min_liquidity_usd, warnings, { nonNegative: true });
   const flags = [];
 
   if (totalUsd === null) {
@@ -236,9 +332,13 @@ export function buildLiquidityRisk(input, market, options = {}) {
     flags.push("below_requested_minimum");
   }
   if (marketCap === null || marketCap <= 0) addWarning(warnings, "market_cap_unavailable");
+  const liquidityMarketCapRatio = safeRatio(totalUsd, marketCap, warnings);
+  const poolDistribution = pairs
+    .map((pair) => poolSummary(pair, warnings))
+    .sort((left, right) => (right.liquidity_usd ?? -1) - (left.liquidity_usd ?? -1));
 
   return {
-    ...envelope("liquidity-risk-scan", input, market, options, warnings),
+    ...envelope("liquidity-risk-scan", input, market, context, warnings),
     risk_level: riskFromLiquidity(totalUsd),
     flags,
     liquidity: {
@@ -247,25 +347,22 @@ export function buildLiquidityRisk(input, market, options = {}) {
       pools_observed: pairs.length,
       primary_share: primaryShare,
       market_cap_usd: marketCap,
-      liquidity_to_market_cap_ratio: totalUsd !== null && marketCap !== null && marketCap > 0
-        ? totalUsd / marketCap
-        : null,
+      liquidity_to_market_cap_ratio: liquidityMarketCapRatio,
       min_liquidity_usd: minLiquidity,
       meets_minimum: minLiquidity !== null && totalUsd !== null ? totalUsd >= minLiquidity : null,
     },
-    pool_distribution: pairs
-      .map(poolSummary)
-      .sort((left, right) => (right.liquidity_usd ?? -1) - (left.liquidity_usd ?? -1)),
+    pool_distribution: poolDistribution,
   };
 }
 
 export function buildTradingActivity(input, market, options = {}) {
+  const context = analysisContext(options);
   const warnings = providerWarnings(market);
   const primary = primaryPairOf(market);
   const windows = Object.fromEntries(WINDOWS.map((window) => {
-    const counts = transactionWindow(primary, window);
+    const counts = transactionWindow(primary, window, warnings);
     return [window, {
-      volume_usd: numberOrNull(primary?.volume?.[window]),
+      volume_usd: numberOrNull(primary?.volume?.[window], warnings, { nonNegative: true }),
       buy_count: counts.buys,
       sell_count: counts.sells,
       total_transactions: counts.total,
@@ -295,9 +392,9 @@ export function buildTradingActivity(input, market, options = {}) {
     addWarning(warnings, "activity_windows_incomplete");
   }
 
-  const requestedLookback = numberOrNull(input?.lookback_hours);
+  const requestedLookback = numberOrNull(input?.lookback_hours, warnings, { nonNegative: true });
   return {
-    ...envelope("trading-activity-scan", input, market, options, warnings),
+    ...envelope("trading-activity-scan", input, market, context, warnings),
     flags,
     activity: {
       classification,
@@ -309,11 +406,29 @@ export function buildTradingActivity(input, market, options = {}) {
 }
 
 export function buildNewPairRisk(input, market, options = {}) {
+  const context = analysisContext(options);
   const warnings = providerWarnings(market);
   const primary = primaryPairOf(market);
-  const { now } = analysisOptions(options);
-  const pairAgeHours = ageHours(primary, now, warnings);
-  const liquidityUsd = numberOrNull(primary?.liquidity?.usd);
+  const pairAgeHours = ageHours(primary, context.now, warnings);
+  const liquidityUsd = numberOrNull(
+    primary?.liquidity?.usd,
+    warnings,
+    { nonNegative: true },
+  );
+  const priceUsd = numberOrNull(primary?.priceUsd, warnings, { nonNegative: true });
+  const priceNative = numberOrNull(primary?.priceNative, warnings, { nonNegative: true });
+  const priceChanges = nullableWindows(primary?.priceChange, warnings);
+  const volume = nullableWindows(primary?.volume, warnings, { nonNegative: true });
+  const transactions = Object.fromEntries(WINDOWS.map((window) => {
+    const counts = transactionWindow(primary, window, warnings);
+    return [window, { buys: counts.buys, sells: counts.sells, total: counts.total }];
+  }));
+  const hasPriceEvidence = priceUsd !== null
+    || priceNative !== null
+    || Object.values(priceChanges).some((value) => value !== null);
+  const hasTradingEvidence = Object.values(volume).some((value) => value !== null)
+    || Object.values(transactions).some((counts) => counts.buys !== null || counts.sells !== null);
+  const hasCriticalEvidence = liquidityUsd !== null || hasPriceEvidence || hasTradingEvidence;
   const acceptedProfiles = new Set(["conservative", "balanced", "aggressive"]);
   const requestedProfile = input?.risk_profile;
   const riskProfile = acceptedProfiles.has(requestedProfile) ? requestedProfile : "balanced";
@@ -335,9 +450,14 @@ export function buildNewPairRisk(input, market, options = {}) {
     }
     if (riskLevel !== "unknown") riskLevel = raiseSeverity(riskLevel);
   }
+  if (!hasCriticalEvidence) {
+    riskLevel = "unknown";
+    flags.push("insufficient_launch_data");
+    addWarning(warnings, "launch_critical_inputs_unavailable");
+  }
 
   return {
-    ...envelope("new-pair-risk-check", input, market, options, warnings),
+    ...envelope("new-pair-risk-check", input, market, context, warnings),
     risk_level: riskLevel,
     risk_profile: riskProfile,
     pair_age_hours: pairAgeHours,
@@ -345,8 +465,17 @@ export function buildNewPairRisk(input, market, options = {}) {
     launch_evidence: {
       liquidity_usd: liquidityUsd,
       profile_liquidity_threshold_usd: profileLiquidityThreshold,
-      price_changes: nullableWindows(primary?.priceChange),
-      volume: nullableWindows(primary?.volume),
+      price_usd: priceUsd,
+      price_native: priceNative,
+      price_changes: priceChanges,
+      volume,
+      transactions,
+    },
+    coverage: {
+      pair_age: pairAgeHours !== null,
+      liquidity: liquidityUsd !== null,
+      price: hasPriceEvidence,
+      trading: hasTradingEvidence,
     },
   };
 }
@@ -356,16 +485,19 @@ function anomaly(code, window, value, threshold, direction = null) {
 }
 
 export function buildMarketAnomaly(input, market, options = {}) {
+  const context = analysisContext(options);
   const warnings = providerWarnings(market);
   const primary = primaryPairOf(market);
-  const h1Change = numberOrNull(primary?.priceChange?.h1);
-  const h24Change = numberOrNull(primary?.priceChange?.h24);
-  const h24Volume = numberOrNull(primary?.volume?.h24);
-  const liquidityUsd = numberOrNull(primary?.liquidity?.usd);
-  const h24Txns = transactionWindow(primary, "h24");
-  const volumeLiquidityRatio = h24Volume !== null && liquidityUsd !== null && liquidityUsd > 0
-    ? h24Volume / liquidityUsd
-    : null;
+  const h1Change = numberOrNull(primary?.priceChange?.h1, warnings);
+  const h24Change = numberOrNull(primary?.priceChange?.h24, warnings);
+  const h24Volume = numberOrNull(primary?.volume?.h24, warnings, { nonNegative: true });
+  const liquidityUsd = numberOrNull(
+    primary?.liquidity?.usd,
+    warnings,
+    { nonNegative: true },
+  );
+  const h24Txns = transactionWindow(primary, "h24", warnings);
+  const volumeLiquidityRatio = safeRatio(h24Volume, liquidityUsd, warnings);
   const anomalies = [];
 
   if (h1Change !== null && Math.abs(h1Change) >= 20) {
@@ -384,12 +516,16 @@ export function buildMarketAnomaly(input, market, options = {}) {
     anomalies.push(anomaly("volume_liquidity_ratio_h24", "h24", volumeLiquidityRatio, 5));
   }
 
-  const customThreshold = numberOrNull(input?.anomaly_threshold);
-  const requestedLookback = numberOrNull(input?.lookback_hours);
+  const customThreshold = numberOrNull(
+    input?.anomaly_threshold,
+    warnings,
+    { nonNegative: true },
+  );
+  const requestedLookback = numberOrNull(input?.lookback_hours, warnings, { nonNegative: true });
   let customCheck = null;
   if (customThreshold !== null) {
     const window = selectedLookbackWindow(requestedLookback ?? 24);
-    const value = numberOrNull(primary?.priceChange?.[window]);
+    const value = numberOrNull(primary?.priceChange?.[window], warnings);
     const triggered = value === null ? null : Math.abs(value) >= customThreshold;
     customCheck = {
       window,
@@ -413,26 +549,36 @@ export function buildMarketAnomaly(input, market, options = {}) {
     addWarning(warnings, "anomaly_ratio_inputs_unavailable");
   }
 
-  const hasCoreInput = [
+  const defaultExecutableChecks = [
     h1Change,
     h24Change,
-    h24Txns.buys,
-    h24Txns.sells,
-    h24Volume,
-    liquidityUsd,
-  ].some((value) => value !== null);
-  if (!hasCoreInput) addWarning(warnings, "core_anomaly_inputs_unavailable");
+    h24Txns.buyRatio,
+    h24Txns.sellRatio,
+    volumeLiquidityRatio,
+  ].filter((value) => value !== null).length;
+  const customExecutableChecks = customCheck?.triggered !== null && customCheck !== null ? 1 : 0;
+  const totalChecks = 5 + (customThreshold !== null ? 1 : 0);
+  const executableChecks = defaultExecutableChecks + customExecutableChecks;
+  const coverageRatio = safeRatio(executableChecks, totalChecks, warnings);
+  const completeCoverage = executableChecks === totalChecks;
+  if (defaultExecutableChecks === 0) addWarning(warnings, "core_anomaly_inputs_unavailable");
+  if (!completeCoverage) addWarning(warnings, "anomaly_check_coverage_incomplete");
 
-  const riskLevel = !hasCoreInput
-    ? "unknown"
-    : anomalies.length >= 4
-      ? "critical"
-      : anomalies.length >= 2 ? "high" : anomalies.length === 1 ? "medium" : "low";
+  const confidence = executableChecks === 0
+    ? "none"
+    : coverageRatio < 0.5 ? "low" : coverageRatio < 1 ? "medium" : "high";
+  const riskLevel = anomalies.length >= 4
+    ? "critical"
+    : anomalies.length >= 2
+      ? "high"
+      : anomalies.length === 1 ? "medium" : completeCoverage ? "low" : "unknown";
   const flags = anomalies.map((item) => item.code);
-  if (!hasCoreInput) flags.push("insufficient_market_data");
+  if (anomalies.length === 0 && !completeCoverage) flags.push("insufficient_market_data");
+  if (anomalies.length > 0 && !completeCoverage) flags.push("partial_check_coverage");
   return {
-    ...envelope("market-anomaly-scan", input, market, options, warnings),
+    ...envelope("market-anomaly-scan", input, market, context, warnings),
     risk_level: riskLevel,
+    confidence,
     flags,
     metrics: {
       price_change_h1_percent: h1Change,
@@ -444,6 +590,12 @@ export function buildMarketAnomaly(input, market, options = {}) {
       volume_liquidity_ratio_h24: volumeLiquidityRatio,
     },
     custom_check: customCheck,
+    coverage: {
+      executable_checks: executableChecks,
+      total_checks: totalChecks,
+      ratio: coverageRatio,
+      complete: completeCoverage,
+    },
     anomalies,
   };
 }

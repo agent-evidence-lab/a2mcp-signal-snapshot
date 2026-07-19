@@ -16,6 +16,7 @@ const input = Object.freeze({
 
 const FIXED_NOW = Date.parse("2026-07-19T08:00:00.000Z");
 const FIXED_UUID = "11111111-1111-4111-8111-111111111111";
+const HOUR_MS = 60 * 60 * 1_000;
 const deterministic = Object.freeze({
   now: () => FIXED_NOW,
   requestId: () => FIXED_UUID,
@@ -86,6 +87,27 @@ function market(primary = pair(), additionalPairs = []) {
 
 function withLiquidity(totalUsd) {
   return market(pair({ liquidity: { usd: totalUsd, base: null, quote: null } }));
+}
+
+function withoutProviderWarnings(value = market()) {
+  const copy = structuredClone(value);
+  delete copy.data_quality;
+  return copy;
+}
+
+function assertAllNumbersFinite(value, path = "result") {
+  if (typeof value === "number") {
+    assert.ok(Number.isFinite(value), `${path} must be finite`);
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => assertAllNumbersFinite(item, `${path}[${index}]`));
+    return;
+  }
+  for (const [key, item] of Object.entries(value)) {
+    assertAllNumbersFinite(item, `${path}.${key}`);
+  }
 }
 
 test("all five builders return the exact shared envelope and unique catalog service ids", () => {
@@ -162,6 +184,56 @@ test("market snapshot preserves unknown values and warns when the primary pair i
   assert.deepEqual(result.top_pools, []);
   assert.ok(result.data_quality.warnings.includes("primary_pair_unavailable"));
   assert.ok(result.data_quality.warnings.includes("pair_created_at_unavailable"));
+});
+
+test("data quality is complete only when primary data and every source are healthy without warnings", () => {
+  const result = buildMarketSnapshot(input, withoutProviderWarnings(), deterministic);
+
+  assert.equal(result.data_quality.status, "complete");
+  assert.deepEqual(result.data_quality.warnings, []);
+  assert.deepEqual(result.data_quality.source_statuses, [{
+    source: "dexscreener",
+    status: "ok",
+    url: "https://api.dexscreener.com/token-pairs/v1/ethereum/token",
+  }]);
+  assert.deepEqual(result.data_quality.fallback, { used: false, reason: null });
+});
+
+test("data quality marks successful fallback as partial with explicit source provenance", () => {
+  const fallbackMarket = withoutProviderWarnings();
+  fallbackMarket.source = "geckoterminal";
+  fallbackMarket.sources = [
+    {
+      source: "dexscreener",
+      status: "empty",
+      url: "https://api.dexscreener.com/token-pairs/v1/ethereum/token",
+      pairCount: 0,
+      usablePairCount: 0,
+    },
+    {
+      source: "geckoterminal",
+      status: "ok",
+      url: "https://api.geckoterminal.com/api/v2/networks/eth/tokens/token/pools",
+      pairCount: 1,
+      usablePairCount: 1,
+    },
+  ];
+  fallbackMarket.fallback = { reason: "dexscreener_empty", attemptedPairs: [] };
+
+  const result = buildMarketSnapshot(input, fallbackMarket, deterministic);
+
+  assert.equal(result.data_quality.status, "partial");
+  assert.deepEqual(result.data_quality.fallback, {
+    used: true,
+    reason: "dexscreener_empty",
+  });
+  assert.ok(result.data_quality.warnings.includes("market_fallback_used:dexscreener_empty"));
+  assert.ok(result.data_quality.warnings.includes("source_degraded:dexscreener:empty"));
+  assert.deepEqual(result.data_quality.source_statuses.map(({ source, status }) => ({ source, status })), [
+    { source: "dexscreener", status: "empty" },
+    { source: "geckoterminal", status: "ok" },
+  ]);
+  assert.deepEqual(result.sources, fallbackMarket.sources);
 });
 
 test("liquidity risk uses exact 10k, 50k, and 200k boundaries", () => {
@@ -397,6 +469,24 @@ test("new-pair risk keeps missing creation time unknown instead of inferring saf
   assert.ok(result.flags.includes("pair_age_unknown"));
 });
 
+test("new-pair risk does not infer low risk from old age when all critical launch evidence is missing", () => {
+  const sparsePair = pair({
+    pairCreatedAt: FIXED_NOW - (30 * 24 * 60 * 60 * 1_000),
+    priceUsd: null,
+    priceNative: null,
+    priceChange: {},
+    volume: {},
+    txns: {},
+    liquidity: { usd: null, base: null, quote: null },
+  });
+  const result = buildNewPairRisk(input, market(sparsePair), deterministic);
+
+  assert.equal(result.pair_age_hours, 720);
+  assert.equal(result.risk_level, "unknown");
+  assert.ok(result.flags.includes("insufficient_launch_data"));
+  assert.ok(result.data_quality.warnings.includes("launch_critical_inputs_unavailable"));
+});
+
 test("market anomaly flags inclusive price, direction, and volume-liquidity thresholds", () => {
   const primary = pair({
     priceChange: { h1: -20, h24: 50 },
@@ -480,6 +570,54 @@ test("market anomaly reports unknown when every core input is unavailable", () =
   assert.ok(result.data_quality.warnings.includes("core_anomaly_inputs_unavailable"));
 });
 
+test("market anomaly treats one executable zero-change check as sparse rather than low risk", () => {
+  const sparsePair = pair({
+    priceChange: { h1: 0 },
+    volume: {},
+    txns: {},
+    liquidity: { usd: null },
+  });
+  const result = buildMarketAnomaly(input, market(sparsePair), deterministic);
+
+  assert.equal(result.risk_level, "unknown");
+  assert.equal(result.confidence, "low");
+  assert.deepEqual(result.coverage, {
+    executable_checks: 1,
+    total_checks: 5,
+    ratio: 0.2,
+    complete: false,
+  });
+  assert.deepEqual(result.anomalies, []);
+  assert.ok(result.flags.includes("insufficient_market_data"));
+  assert.ok(result.data_quality.warnings.includes("anomaly_check_coverage_incomplete"));
+});
+
+test("market anomaly honors a triggering custom-only check when default windows are unavailable", () => {
+  const customOnlyPair = pair({
+    priceChange: { h6: -12 },
+    volume: {},
+    txns: {},
+    liquidity: { usd: null },
+  });
+  const result = buildMarketAnomaly(
+    { ...input, lookback_hours: 6, anomaly_threshold: 10 },
+    market(customOnlyPair),
+    deterministic,
+  );
+
+  assert.equal(result.custom_check.triggered, true);
+  assert.equal(result.risk_level, "medium");
+  assert.equal(result.confidence, "low");
+  assert.ok(result.flags.includes("custom_price_change_h6"));
+  assert.ok(!result.flags.includes("insufficient_market_data"));
+  assert.deepEqual(result.coverage, {
+    executable_checks: 1,
+    total_checks: 6,
+    ratio: 1 / 6,
+    complete: false,
+  });
+});
+
 test("market anomaly never fabricates ratios for zero or missing liquidity and transactions", () => {
   const zeroLiquidity = buildMarketAnomaly(
     input,
@@ -498,5 +636,122 @@ test("market anomaly never fabricates ratios for zero or missing liquidity and t
     assert.equal(result.metrics.sell_ratio_h24, null);
     assert.ok(!result.anomalies.some((item) => item.code === "volume_liquidity_ratio_h24"));
     assert.ok(result.data_quality.warnings.includes("anomaly_ratio_inputs_unavailable"));
+  }
+});
+
+test("numeric hardening rejects negative market values and never classifies negative transactions as active", () => {
+  const invalidPair = pair({
+    priceUsd: -1,
+    priceNative: -0.1,
+    marketCap: -10,
+    fdv: -20,
+    liquidity: { usd: -100, base: -10, quote: -20 },
+    volume: { m5: -1, h1: -2, h6: -3, h24: -4 },
+    txns: { h24: { buys: -3, sells: -2 } },
+  });
+  const invalidMarket = market(invalidPair);
+  const snapshot = buildMarketSnapshot(input, invalidMarket, deterministic);
+  const activity = buildTradingActivity(input, invalidMarket, deterministic);
+  const anomalyResult = buildMarketAnomaly(input, invalidMarket, deterministic);
+
+  assert.equal(snapshot.price.usd, null);
+  assert.equal(snapshot.price.native, null);
+  assert.equal(snapshot.valuation.market_cap_usd, null);
+  assert.equal(snapshot.valuation.fdv_usd, null);
+  assert.equal(snapshot.liquidity.primary_pool_usd, null);
+  assert.equal(snapshot.volume.h24, null);
+  assert.equal(snapshot.transactions.h24.total, null);
+  assert.equal(activity.activity.windows.h24.volume_usd, null);
+  assert.equal(activity.activity.windows.h24.buy_count, null);
+  assert.equal(activity.activity.windows.h24.sell_count, null);
+  assert.equal(activity.activity.classification, "unknown");
+  assert.equal(anomalyResult.metrics.volume_h24_usd, null);
+  assert.equal(anomalyResult.metrics.liquidity_usd, null);
+  assert.equal(anomalyResult.risk_level, "unknown");
+  for (const result of [snapshot, activity, anomalyResult]) {
+    assert.ok(result.data_quality.warnings.includes("invalid_negative_numeric"));
+    assertAllNumbersFinite(result);
+  }
+});
+
+test("numeric hardening detects overflow in liquidity, transaction sums, and derived ratios", () => {
+  const primary = pair({
+    liquidity: { usd: Number.MAX_VALUE, base: null, quote: null },
+    volume: { h24: Number.MAX_VALUE },
+    txns: { h24: { buys: Number.MAX_VALUE, sells: Number.MAX_VALUE } },
+  });
+  const secondary = pair({
+    pairAddress: "0xpair-overflow",
+    liquidity: { usd: Number.MAX_VALUE, base: null, quote: null },
+  });
+  const overflowMarket = market(primary, [secondary]);
+  const liquidity = buildLiquidityRisk(input, overflowMarket, deterministic);
+  const activity = buildTradingActivity(input, overflowMarket, deterministic);
+  const anomalyResult = buildMarketAnomaly(input, overflowMarket, deterministic);
+
+  assert.equal(liquidity.liquidity.total_usd, null);
+  assert.equal(liquidity.risk_level, "unknown");
+  assert.equal(activity.activity.windows.h24.total_transactions, null);
+  assert.equal(activity.activity.classification, "unknown");
+  assert.equal(anomalyResult.metrics.buy_ratio_h24, null);
+  assert.equal(anomalyResult.metrics.sell_ratio_h24, null);
+  for (const result of [liquidity, activity, anomalyResult]) {
+    assert.ok(result.data_quality.warnings.includes("numeric_overflow"));
+    assertAllNumbersFinite(result);
+  }
+
+  const ratioOverflow = buildMarketAnomaly(
+    input,
+    market(pair({ volume: { h24: Number.MAX_VALUE }, liquidity: { usd: Number.MIN_VALUE }, txns: {} })),
+    deterministic,
+  );
+  assert.equal(ratioOverflow.metrics.volume_liquidity_ratio_h24, null);
+  assert.ok(ratioOverflow.data_quality.warnings.includes("numeric_overflow"));
+  assertAllNumbersFinite(ratioOverflow);
+});
+
+test("numeric hardening sanitizes non-finite input and source metadata before output", () => {
+  const malformedMarket = withoutProviderWarnings();
+  malformedMarket.sources[0].pairCount = Number.POSITIVE_INFINITY;
+  const result = buildMarketAnomaly(
+    { ...input, anomaly_threshold: Number.NaN, lookback_hours: Number.POSITIVE_INFINITY },
+    malformedMarket,
+    deterministic,
+  );
+
+  assert.equal(result.input.anomaly_threshold, null);
+  assert.equal(result.input.lookback_hours, null);
+  assert.equal(result.sources[0].pairCount, null);
+  assert.ok(result.data_quality.warnings.includes("invalid_non_finite_numeric"));
+  assertAllNumbersFinite(result);
+});
+
+test("every builder parses the execution clock and request context exactly once", () => {
+  const builders = [
+    buildMarketSnapshot,
+    buildLiquidityRisk,
+    buildTradingActivity,
+    buildNewPairRisk,
+    buildMarketAnomaly,
+  ];
+
+  for (const builder of builders) {
+    let clockCalls = 0;
+    let requestIdCalls = 0;
+    const result = builder(input, market(), {
+      now: () => {
+        clockCalls += 1;
+        return FIXED_NOW + ((clockCalls - 1) * HOUR_MS);
+      },
+      requestId: () => {
+        requestIdCalls += 1;
+        return FIXED_UUID;
+      },
+    });
+
+    assert.equal(clockCalls, 1, `${result.service.id} must parse its clock once`);
+    assert.equal(requestIdCalls, 1, `${result.service.id} must create one request id`);
+    assert.equal(result.generated_at, "2026-07-19T08:00:00.000Z");
+    if ("pair_age_hours" in result) assert.equal(result.pair_age_hours, 336);
   }
 });
