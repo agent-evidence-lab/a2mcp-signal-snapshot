@@ -4,9 +4,12 @@ export const solanaTokenAddress = "So11111111111111111111111111111111111111112";
 export const solanaCaseVariantAddress = "so11111111111111111111111111111111111111112";
 export const geckoQuoteTokenAddress = "0xA0b86991c6218b36c1d19d4a2e9eb0cE3606eB48";
 export const geckoQuoteTokenAddressLower = geckoQuoteTokenAddress.toLowerCase();
+export const geckoAdditionalQuoteTokenAddress = "0xdAC17F958D2ee523a2206206994597C13D831ec7";
+export const geckoAdditionalQuoteTokenAddressLower = geckoAdditionalQuoteTokenAddress.toLowerCase();
 
 const geckoTokenId = `eth_${evmTokenAddressLower}`;
 const geckoQuoteTokenId = `eth_${geckoQuoteTokenAddressLower}`;
+const geckoAdditionalQuoteTokenId = `eth_${geckoAdditionalQuoteTokenAddressLower}`;
 
 export const dexPairs = [
   {
@@ -200,6 +203,76 @@ export const geckoQuoteTokenPools = {
       id: geckoQuoteTokenId,
       type: "token",
       attributes: { address: geckoQuoteTokenAddress, name: "USD Coin", symbol: "USDC" },
+    },
+  ],
+};
+
+export const geckoMultiTokenPools = {
+  data: [
+    {
+      id: "eth_0xpool-multi-token",
+      type: "pool",
+      attributes: {
+        address: "0xpool-multi-token",
+        name: "DAI / USDC / USDT / PYUSD",
+        base_token_price_usd: "1.002",
+        base_token_price_native_currency: "0.00033",
+        quote_token_price_usd: "1.001",
+        quote_token_price_native_currency: "0.00034",
+        token_price_usd: "0.9987",
+        reserve_in_usd: "1250000",
+        volume_usd: { h1: "42000", h24: "925000" },
+        price_change_percentage: { h1: "-0.02", h24: "0.08" },
+        transactions: { h1: { buys: 81, sells: 73, buyers: 60, sellers: 58 } },
+        fdv_usd: "140000000000",
+        market_cap_usd: "137000000000",
+        pool_created_at: "2024-04-01T00:00:00Z",
+      },
+      relationships: {
+        base_token: { data: { id: "eth_0x6b175474e89094c44da98b954eedeac495271d0f", type: "token" } },
+        quote_token: { data: { id: geckoQuoteTokenId, type: "token" } },
+        quote_tokens: {
+          data: [
+            { id: geckoAdditionalQuoteTokenId, type: "token" },
+            { id: "eth_0x6c3ea9036406852006290770bedfcaba0e23a0e8", type: "token" },
+          ],
+        },
+        dex: { data: { id: "curve", type: "dex" } },
+      },
+    },
+  ],
+  included: [
+    {
+      id: "eth_0x6b175474e89094c44da98b954eedeac495271d0f",
+      type: "token",
+      attributes: {
+        address: "0x6B175474E89094C44Da98b954EedeAC495271d0F",
+        name: "Dai Stablecoin",
+        symbol: "DAI",
+      },
+    },
+    {
+      id: geckoQuoteTokenId,
+      type: "token",
+      attributes: { address: geckoQuoteTokenAddress, name: "USD Coin", symbol: "USDC" },
+    },
+    {
+      id: geckoAdditionalQuoteTokenId,
+      type: "token",
+      attributes: {
+        address: geckoAdditionalQuoteTokenAddress,
+        name: "Tether USD",
+        symbol: "USDT",
+      },
+    },
+    {
+      id: "eth_0x6c3ea9036406852006290770bedfcaba0e23a0e8",
+      type: "token",
+      attributes: {
+        address: "0x6c3ea9036406852006290770BEdFcAbA0e23A0e8",
+        name: "PayPal USD",
+        symbol: "PYUSD",
+      },
     },
   ],
 };

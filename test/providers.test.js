@@ -13,6 +13,9 @@ import {
   dexPairsWithoutUsableLiquidity,
   evmTokenAddress,
   evmTokenAddressLower,
+  geckoAdditionalQuoteTokenAddress,
+  geckoAdditionalQuoteTokenAddressLower,
+  geckoMultiTokenPools,
   geckoPools,
   geckoQuoteTokenAddress,
   geckoQuoteTokenAddressLower,
@@ -85,6 +88,26 @@ test("ttl cache does not retain failed loads", async () => {
 
   assert.equal(await cache.getOrLoad("token", 1_000, async () => ++calls), 2);
   assert.equal(calls, 2);
+});
+
+test("ttl cache preserves a cached value when a full-capacity miss rejects", async () => {
+  let stableLoads = 0;
+  const cache = createTtlCache({ maxEntries: 1 });
+  const loadStable = () => cache.getOrLoad("stable", 10_000, async () => {
+    stableLoads += 1;
+    return `stable-${stableLoads}`;
+  });
+
+  assert.equal(await loadStable(), "stable-1");
+  await assert.rejects(
+    cache.getOrLoad("failing", 10_000, async () => {
+      throw new Error("temporary failure");
+    }),
+    /temporary failure/,
+  );
+
+  assert.equal(await loadStable(), "stable-1");
+  assert.equal(stableLoads, 1);
 });
 
 test("ttl cache de-duplicates concurrent loads for one key", async () => {
@@ -524,6 +547,40 @@ test("marketFallback orients quote-side GeckoTerminal metadata to the requested 
   assert.equal(market.primaryPair.priceNative, 0.0004);
   assert.equal(market.primaryPair.fdv, 50_000_000);
   assert.equal(market.primaryPair.marketCap, 49_000_000);
+});
+
+test("marketFallback orients an additional GeckoTerminal quote token and target metrics", async () => {
+  let requestedUrl;
+  const providers = createProviders({
+    fetchImpl: async (url) => {
+      requestedUrl = String(url);
+      return jsonResponse(geckoMultiTokenPools);
+    },
+  });
+
+  const market = await providers.marketFallback(
+    "ethereum",
+    geckoAdditionalQuoteTokenAddressLower,
+  );
+
+  assert.equal(
+    requestedUrl,
+    `https://api.geckoterminal.com/api/v2/networks/eth/tokens/${geckoAdditionalQuoteTokenAddressLower}/pools?include=base_token,quote_token`,
+  );
+  assert.deepEqual(market.primaryPair.baseToken, {
+    address: geckoAdditionalQuoteTokenAddress,
+    name: "Tether USD",
+    symbol: "USDT",
+  });
+  assert.deepEqual(market.primaryPair.quoteToken, {
+    address: "0x6B175474E89094C44Da98b954EedeAC495271d0F",
+    name: "Dai Stablecoin",
+    symbol: "DAI",
+  });
+  assert.equal(market.primaryPair.priceUsd, 0.9987);
+  assert.equal(market.primaryPair.priceNative, null);
+  assert.equal(market.primaryPair.fdv, 140_000_000_000);
+  assert.equal(market.primaryPair.marketCap, 137_000_000_000);
 });
 
 test("security normalizes GoPlus contract, trading, holder, and unknown fields", async () => {

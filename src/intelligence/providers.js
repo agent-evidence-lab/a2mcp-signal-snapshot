@@ -270,20 +270,33 @@ function normalizeGeckoMarket(payload, {
     const pairCreatedAt = Date.parse(attributes.pool_created_at);
     const poolBaseToken = geckoToken(payload, pool?.relationships?.base_token, networkId);
     const poolQuoteToken = geckoToken(payload, pool?.relationships?.quote_token, networkId);
-    const requestedTokenIsQuote = addressesEqual(
+    const additionalQuoteTokens = Array.isArray(pool?.relationships?.quote_tokens?.data)
+      ? pool.relationships.quote_tokens.data.map((data) => (
+        geckoToken(payload, { data }, networkId)
+      ))
+      : [];
+    const requestedAdditionalQuoteToken = additionalQuoteTokens.find((token) => (
+      addressesEqual(chain, token.address, tokenAddress)
+    ));
+    const requestedTokenIsPrimaryQuote = addressesEqual(
       chain,
       poolQuoteToken.address,
       tokenAddress,
     );
+    const requestedTokenIsQuote = requestedTokenIsPrimaryQuote
+      || Boolean(requestedAdditionalQuoteToken);
+    const requestedQuoteToken = requestedAdditionalQuoteToken ?? poolQuoteToken;
     return normalizePair({
       chainId: chain,
       dexId: pool?.relationships?.dex?.data?.id,
       pairAddress,
-      baseToken: requestedTokenIsQuote ? poolQuoteToken : poolBaseToken,
+      baseToken: requestedTokenIsQuote ? requestedQuoteToken : poolBaseToken,
       quoteToken: requestedTokenIsQuote ? poolBaseToken : poolQuoteToken,
-      priceNative: requestedTokenIsQuote
+      priceNative: requestedTokenIsPrimaryQuote
         ? attributes.quote_token_price_native_currency
-        : attributes.base_token_price_native_currency,
+        : requestedAdditionalQuoteToken
+          ? null
+          : attributes.base_token_price_native_currency,
       priceUsd: attributes.token_price_usd ?? (requestedTokenIsQuote
         ? attributes.quote_token_price_usd
         : attributes.base_token_price_usd),

@@ -14,10 +14,31 @@ export function createTtlCache({ maxEntries = 256, now = () => Date.now() } = {}
   }
 
   function evictOldestEntry() {
-    const oldestKey = entries.keys().next().value;
-    if (oldestKey === undefined) return false;
-    entries.delete(oldestKey);
-    return true;
+    const oldest = entries.entries().next();
+    if (oldest.done) return null;
+    entries.delete(oldest.value[0]);
+    return oldest.value;
+  }
+
+  function restoreDisplacedEntries(displacedEntries) {
+    purgeExpired();
+    const availableEntries = maxEntries - pendingLoads.size - entries.size;
+    if (availableEntries <= 0) return;
+
+    const currentTime = now();
+    const restored = displacedEntries
+      .filter(([key, entry]) => (
+        entry.expiresAt > currentTime
+        && !entries.has(key)
+        && !pendingLoads.has(key)
+      ))
+      .slice(0, availableEntries);
+    if (restored.length === 0) return;
+
+    const retained = [...entries];
+    entries.clear();
+    for (const [key, entry] of restored) entries.set(key, entry);
+    for (const [key, entry] of retained) entries.set(key, entry);
   }
 
   function waitForPendingLoad() {
@@ -31,6 +52,7 @@ export function createTtlCache({ maxEntries = 256, now = () => Date.now() } = {}
 
   return {
     async getOrLoad(key, ttlMs, loader) {
+      const displacedEntries = [];
       while (true) {
         const cached = entries.get(key);
         if (cached?.expiresAt > now()) return cached.value;
@@ -41,7 +63,7 @@ export function createTtlCache({ maxEntries = 256, now = () => Date.now() } = {}
 
         purgeExpired();
         while (entries.size + pendingLoads.size >= maxEntries && entries.size > 0) {
-          evictOldestEntry();
+          displacedEntries.push(evictOldestEntry());
         }
 
         if (entries.size + pendingLoads.size < maxEntries) break;
@@ -63,6 +85,7 @@ export function createTtlCache({ maxEntries = 256, now = () => Date.now() } = {}
           },
           (error) => {
             if (pendingLoads.get(key) === load) pendingLoads.delete(key);
+            restoreDisplacedEntries(displacedEntries);
             throw error;
           }
         );
