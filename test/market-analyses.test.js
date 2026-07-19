@@ -1,0 +1,419 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import {
+  buildLiquidityRisk,
+  buildMarketAnomaly,
+  buildMarketSnapshot,
+  buildNewPairRisk,
+  buildTradingActivity,
+} from "../src/intelligence/market-analyses.js";
+
+const input = Object.freeze({
+  chain: "ethereum",
+  token_address: "0x1111111111111111111111111111111111111111",
+  language: "zh-CN",
+});
+
+const FIXED_NOW = Date.parse("2026-07-19T08:00:00.000Z");
+const FIXED_UUID = "11111111-1111-4111-8111-111111111111";
+const deterministic = Object.freeze({
+  now: () => FIXED_NOW,
+  requestId: () => FIXED_UUID,
+});
+
+function pair(overrides = {}) {
+  return {
+    chainId: "ethereum",
+    dexId: "uniswap",
+    pairAddress: "0xpair-primary",
+    labels: ["v3"],
+    baseToken: {
+      address: input.token_address,
+      name: "Evidence Token",
+      symbol: "EVD",
+    },
+    quoteToken: {
+      address: "0x2222222222222222222222222222222222222222",
+      name: "USD Coin",
+      symbol: "USDC",
+    },
+    priceNative: 0.0004,
+    priceUsd: 1.25,
+    priceChange: { m5: 1, h1: 5, h6: 9, h24: 15 },
+    volume: { m5: 100, h1: 1_000, h6: 6_000, h24: 25_000 },
+    txns: {
+      m5: { buys: 4, sells: 2 },
+      h1: { buys: 30, sells: 20 },
+      h6: { buys: 120, sells: 80 },
+      h24: { buys: 400, sells: 300 },
+    },
+    liquidity: { usd: 250_000, base: 100_000, quote: 125_000 },
+    marketCap: 1_000_000,
+    fdv: 1_250_000,
+    pairCreatedAt: FIXED_NOW - (14 * 24 * 60 * 60 * 1_000),
+    url: "https://dexscreener.com/ethereum/0xpair-primary",
+    source: "dexscreener",
+    sourceUrl: "https://api.dexscreener.com/token-pairs/v1/ethereum/token",
+    accessedAt: "2026-07-19T07:59:30.000Z",
+    ...overrides,
+  };
+}
+
+function market(primary = pair(), additionalPairs = []) {
+  const pairs = primary ? [primary, ...additionalPairs] : [...additionalPairs];
+  return {
+    chain: "ethereum",
+    tokenAddress: input.token_address,
+    source: "dexscreener",
+    sourceUrl: "https://api.dexscreener.com/token-pairs/v1/ethereum/token",
+    accessedAt: "2026-07-19T07:59:30.000Z",
+    pairs,
+    primaryPair: primary,
+    sources: [{
+      source: "dexscreener",
+      url: "https://api.dexscreener.com/token-pairs/v1/ethereum/token",
+      accessedAt: "2026-07-19T07:59:30.000Z",
+      status: primary ? "ok" : "empty",
+      pairCount: pairs.length,
+      usablePairCount: primary ? pairs.length : 0,
+    }],
+    data_quality: {
+      provider_status: "ok",
+      warnings: ["provider supplied normalized market data"],
+    },
+  };
+}
+
+function withLiquidity(totalUsd) {
+  return market(pair({ liquidity: { usd: totalUsd, base: null, quote: null } }));
+}
+
+test("all five builders return the exact shared envelope and unique catalog service ids", () => {
+  const results = [
+    buildMarketSnapshot(input, market(), deterministic),
+    buildLiquidityRisk(input, market(), deterministic),
+    buildTradingActivity(input, market(), deterministic),
+    buildNewPairRisk(input, market(), deterministic),
+    buildMarketAnomaly(input, market(), deterministic),
+  ];
+
+  assert.deepEqual(results.map((result) => result.service.id), [
+    "token-market-snapshot",
+    "liquidity-risk-scan",
+    "trading-activity-scan",
+    "new-pair-risk-check",
+    "market-anomaly-scan",
+  ]);
+  assert.equal(new Set(results.map((result) => result.service.id)).size, 5);
+
+  for (const result of results) {
+    assert.equal(result.ok, true);
+    assert.equal(result.service.version, "0.3.0");
+    assert.equal(result.request_id, FIXED_UUID);
+    assert.equal(result.generated_at, "2026-07-19T08:00:00.000Z");
+    assert.deepEqual(result.input, input);
+    assert.deepEqual(result.sources, market().sources);
+    assert.equal(result.data_quality.provider_status, "ok");
+    assert.ok(result.data_quality.warnings.includes("provider supplied normalized market data"));
+  }
+});
+
+test("market snapshot reports identity, valuation, windows, age, and top pools without risk fields", () => {
+  const secondary = pair({
+    pairAddress: "0xpair-secondary",
+    dexId: "sushiswap",
+    liquidity: { usd: 50_000, base: null, quote: null },
+    url: "https://dexscreener.com/ethereum/0xpair-secondary",
+  });
+  const result = buildMarketSnapshot(input, market(pair(), [secondary]), deterministic);
+
+  assert.deepEqual(result.identity, {
+    chain: "ethereum",
+    token_address: input.token_address,
+    name: "Evidence Token",
+    symbol: "EVD",
+  });
+  assert.equal(result.price.usd, 1.25);
+  assert.equal(result.valuation.market_cap_usd, 1_000_000);
+  assert.equal(result.valuation.fdv_usd, 1_250_000);
+  assert.equal(result.primary_pool.pair_address, "0xpair-primary");
+  assert.equal(result.liquidity.primary_pool_usd, 250_000);
+  assert.equal(result.liquidity.observed_total_usd, 300_000);
+  assert.equal(result.price_changes.h1, 5);
+  assert.equal(result.volume.h24, 25_000);
+  assert.deepEqual(result.transactions.h24, { buys: 400, sells: 300, total: 700 });
+  assert.equal(result.pair_age_hours, 336);
+  assert.deepEqual(result.top_pools.map((pool) => pool.pair_address), [
+    "0xpair-primary",
+    "0xpair-secondary",
+  ]);
+  assert.equal("risk_level" in result, false);
+  assert.equal("anomalies" in result, false);
+});
+
+test("market snapshot preserves unknown values and warns when the primary pair is unavailable", () => {
+  const result = buildMarketSnapshot(input, market(null), deterministic);
+
+  assert.equal(result.identity.name, null);
+  assert.equal(result.price.usd, null);
+  assert.equal(result.liquidity.primary_pool_usd, null);
+  assert.equal(result.pair_age_hours, null);
+  assert.deepEqual(result.top_pools, []);
+  assert.ok(result.data_quality.warnings.includes("primary_pair_unavailable"));
+  assert.ok(result.data_quality.warnings.includes("pair_created_at_unavailable"));
+});
+
+test("liquidity risk uses exact 10k, 50k, and 200k boundaries", () => {
+  const cases = [
+    [9_999.99, "critical"],
+    [10_000, "high"],
+    [49_999.99, "high"],
+    [50_000, "medium"],
+    [199_999.99, "medium"],
+    [200_000, "low"],
+  ];
+
+  for (const [liquidity, expected] of cases) {
+    assert.equal(buildLiquidityRisk(input, withLiquidity(liquidity), deterministic).risk_level, expected);
+  }
+});
+
+test("liquidity risk distinguishes observed zero from missing liquidity", () => {
+  const zero = buildLiquidityRisk(input, withLiquidity(0), deterministic);
+  const missing = buildLiquidityRisk(
+    input,
+    market(pair({ liquidity: { usd: null, base: null, quote: null } })),
+    deterministic,
+  );
+
+  assert.equal(zero.liquidity.total_usd, 0);
+  assert.equal(zero.risk_level, "critical");
+  assert.equal(zero.liquidity.primary_share, null);
+  assert.equal(missing.liquidity.total_usd, null);
+  assert.equal(missing.risk_level, "unknown");
+  assert.ok(missing.flags.includes("liquidity_unknown"));
+});
+
+test("liquidity risk flags primary-pool concentration at exactly 90 percent", () => {
+  const primary = pair({ liquidity: { usd: 90_000, base: null, quote: null } });
+  const secondary = pair({
+    pairAddress: "0xpair-secondary",
+    liquidity: { usd: 10_000, base: null, quote: null },
+  });
+  const concentrated = buildLiquidityRisk(input, market(primary, [secondary]), deterministic);
+  const diversified = buildLiquidityRisk(
+    input,
+    market(
+      pair({ liquidity: { usd: 89_999, base: null, quote: null } }),
+      [pair({ pairAddress: "0xpair-secondary", liquidity: { usd: 10_001, base: null, quote: null } })],
+    ),
+    deterministic,
+  );
+
+  assert.equal(concentrated.liquidity.primary_share, 0.9);
+  assert.ok(concentrated.flags.includes("primary_pool_concentration"));
+  assert.ok(!diversified.flags.includes("primary_pool_concentration"));
+});
+
+test("liquidity risk respects the optional minimum-liquidity threshold", () => {
+  const result = buildLiquidityRisk(
+    { ...input, min_liquidity_usd: 300_000 },
+    withLiquidity(250_000),
+    deterministic,
+  );
+
+  assert.equal(result.liquidity.min_liquidity_usd, 300_000);
+  assert.equal(result.liquidity.meets_minimum, false);
+  assert.ok(result.flags.includes("below_requested_minimum"));
+});
+
+test("trading activity exposes all required windows and classifies zero 24h transactions as inactive", () => {
+  const primary = pair({
+    volume: { m5: 0, h1: 0, h6: 0, h24: 0 },
+    txns: {
+      m5: { buys: 0, sells: 0 },
+      h1: { buys: 0, sells: 0 },
+      h6: { buys: 0, sells: 0 },
+      h24: { buys: 0, sells: 0 },
+    },
+  });
+  const result = buildTradingActivity(input, market(primary), deterministic);
+
+  assert.deepEqual(Object.keys(result.activity.windows), ["m5", "h1", "h6", "h24"]);
+  assert.deepEqual(result.activity.windows.h24, {
+    volume_usd: 0,
+    buy_count: 0,
+    sell_count: 0,
+    total_transactions: 0,
+    buy_ratio: null,
+    sell_ratio: null,
+  });
+  assert.equal(result.activity.classification, "inactive");
+  assert.ok(result.flags.includes("inactive_24h"));
+});
+
+test("trading activity does not mark exactly 80 percent as one-sided but flags values above it", () => {
+  const exact = buildTradingActivity(
+    input,
+    market(pair({ txns: { h24: { buys: 80, sells: 20 } } })),
+    deterministic,
+  );
+  const above = buildTradingActivity(
+    input,
+    market(pair({ txns: { h24: { buys: 81, sells: 19 } } })),
+    deterministic,
+  );
+
+  assert.equal(exact.activity.windows.h24.buy_ratio, 0.8);
+  assert.equal(exact.activity.classification, "active");
+  assert.ok(!exact.flags.includes("one_sided_buying"));
+  assert.equal(above.activity.windows.h24.buy_ratio, 0.81);
+  assert.equal(above.activity.classification, "one-sided");
+  assert.ok(above.flags.includes("one_sided_buying"));
+});
+
+test("trading activity keeps missing windows and partial counts unknown", () => {
+  const result = buildTradingActivity(
+    input,
+    market(pair({ volume: { h24: 1_000 }, txns: { h24: { buys: 5 } } })),
+    deterministic,
+  );
+
+  assert.equal(result.activity.windows.m5.volume_usd, null);
+  assert.equal(result.activity.windows.m5.total_transactions, null);
+  assert.equal(result.activity.windows.h24.buy_count, 5);
+  assert.equal(result.activity.windows.h24.sell_count, null);
+  assert.equal(result.activity.windows.h24.total_transactions, null);
+  assert.equal(result.activity.classification, "unknown");
+  assert.ok(result.data_quality.warnings.includes("activity_windows_incomplete"));
+});
+
+test("new-pair risk uses exact 6h, 24h, and 7d boundaries", () => {
+  const cases = [
+    [5.999, "critical"],
+    [6, "high"],
+    [23.999, "high"],
+    [24, "medium"],
+    [167.999, "medium"],
+    [168, "low"],
+  ];
+
+  for (const [ageHours, expected] of cases) {
+    const createdAt = FIXED_NOW - (ageHours * 60 * 60 * 1_000);
+    const result = buildNewPairRisk(
+      input,
+      market(pair({ pairCreatedAt: createdAt, liquidity: { usd: 100_000 } })),
+      deterministic,
+    );
+    assert.equal(result.risk_level, expected, `${ageHours}h should be ${expected}`);
+  }
+});
+
+test("new-pair risk raises severity once below 50k liquidity and caps at critical", () => {
+  const oldPair = pair({
+    pairCreatedAt: FIXED_NOW - (14 * 24 * 60 * 60 * 1_000),
+    liquidity: { usd: 49_999.99 },
+  });
+  const youngPair = pair({
+    pairCreatedAt: FIXED_NOW - (2 * 60 * 60 * 1_000),
+    liquidity: { usd: 49_999.99 },
+  });
+
+  assert.equal(buildNewPairRisk(input, market(oldPair), deterministic).risk_level, "medium");
+  assert.equal(buildNewPairRisk(input, market(youngPair), deterministic).risk_level, "critical");
+});
+
+test("new-pair risk considers the conservative profile without weakening the mandatory 50k rule", () => {
+  const primary = pair({
+    pairCreatedAt: FIXED_NOW - (14 * 24 * 60 * 60 * 1_000),
+    liquidity: { usd: 75_000 },
+  });
+  const balanced = buildNewPairRisk(input, market(primary), deterministic);
+  const conservative = buildNewPairRisk(
+    { ...input, risk_profile: "conservative" },
+    market(primary),
+    deterministic,
+  );
+
+  assert.equal(balanced.risk_profile, "balanced");
+  assert.equal(balanced.risk_level, "low");
+  assert.equal(conservative.risk_profile, "conservative");
+  assert.equal(conservative.risk_level, "medium");
+  assert.ok(conservative.flags.includes("below_profile_liquidity_threshold"));
+});
+
+test("new-pair risk keeps missing creation time unknown instead of inferring safety", () => {
+  const result = buildNewPairRisk(
+    input,
+    market(pair({ pairCreatedAt: null })),
+    deterministic,
+  );
+
+  assert.equal(result.pair_age_hours, null);
+  assert.equal(result.risk_level, "unknown");
+  assert.ok(result.flags.includes("pair_age_unknown"));
+});
+
+test("market anomaly flags inclusive price, direction, and volume-liquidity thresholds", () => {
+  const primary = pair({
+    priceChange: { h1: -20, h24: 50 },
+    volume: { h24: 500_000 },
+    txns: { h24: { buys: 85, sells: 15 } },
+    liquidity: { usd: 100_000 },
+  });
+  const result = buildMarketAnomaly(input, market(primary), deterministic);
+
+  assert.deepEqual(result.anomalies.map((item) => item.code), [
+    "price_change_h1",
+    "price_change_h24",
+    "buy_ratio_h24",
+    "volume_liquidity_ratio_h24",
+  ]);
+  assert.equal(result.metrics.buy_ratio_h24, 0.85);
+  assert.equal(result.metrics.volume_liquidity_ratio_h24, 5);
+});
+
+test("market anomaly flags the inclusive sell ratio boundary", () => {
+  const result = buildMarketAnomaly(
+    input,
+    market(pair({ txns: { h24: { buys: 15, sells: 85 } } })),
+    deterministic,
+  );
+
+  assert.ok(result.anomalies.some((item) => item.code === "sell_ratio_h24"));
+});
+
+test("market anomaly respects custom threshold and lookback without replacing core checks", () => {
+  const result = buildMarketAnomaly(
+    { ...input, lookback_hours: 6, anomaly_threshold: 10 },
+    market(pair({ priceChange: { h1: 20, h6: 10, h24: 5 } })),
+    deterministic,
+  );
+
+  assert.equal(result.custom_check.window, "h6");
+  assert.equal(result.custom_check.threshold_percent, 10);
+  assert.equal(result.custom_check.triggered, true);
+  assert.ok(result.anomalies.some((item) => item.code === "price_change_h1"));
+  assert.ok(result.anomalies.some((item) => item.code === "custom_price_change_h6"));
+});
+
+test("market anomaly never fabricates ratios for zero or missing liquidity and transactions", () => {
+  const zeroLiquidity = buildMarketAnomaly(
+    input,
+    market(pair({ liquidity: { usd: 0 }, volume: { h24: 500_000 }, txns: {} })),
+    deterministic,
+  );
+  const missingLiquidity = buildMarketAnomaly(
+    input,
+    market(pair({ liquidity: { usd: null }, volume: { h24: 500_000 }, txns: {} })),
+    deterministic,
+  );
+
+  for (const result of [zeroLiquidity, missingLiquidity]) {
+    assert.equal(result.metrics.volume_liquidity_ratio_h24, null);
+    assert.equal(result.metrics.buy_ratio_h24, null);
+    assert.equal(result.metrics.sell_ratio_h24, null);
+    assert.ok(!result.anomalies.some((item) => item.code === "volume_liquidity_ratio_h24"));
+    assert.ok(result.data_quality.warnings.includes("anomaly_ratio_inputs_unavailable"));
+  }
+});
