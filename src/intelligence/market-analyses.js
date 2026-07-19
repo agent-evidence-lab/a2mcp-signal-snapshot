@@ -179,6 +179,8 @@ export function buildMarketSnapshot(input, market, options = {}) {
 
   return {
     ...envelope("token-market-snapshot", input, market, options, warnings),
+    classification: "informational",
+    flags: [],
     identity: {
       chain: market?.chain ?? input?.chain ?? null,
       token_address: market?.tokenAddress ?? input?.token_address ?? null,
@@ -411,13 +413,27 @@ export function buildMarketAnomaly(input, market, options = {}) {
     addWarning(warnings, "anomaly_ratio_inputs_unavailable");
   }
 
-  const riskLevel = anomalies.length >= 4
-    ? "critical"
-    : anomalies.length >= 2 ? "high" : anomalies.length === 1 ? "medium" : "low";
+  const hasCoreInput = [
+    h1Change,
+    h24Change,
+    h24Txns.buys,
+    h24Txns.sells,
+    h24Volume,
+    liquidityUsd,
+  ].some((value) => value !== null);
+  if (!hasCoreInput) addWarning(warnings, "core_anomaly_inputs_unavailable");
+
+  const riskLevel = !hasCoreInput
+    ? "unknown"
+    : anomalies.length >= 4
+      ? "critical"
+      : anomalies.length >= 2 ? "high" : anomalies.length === 1 ? "medium" : "low";
+  const flags = anomalies.map((item) => item.code);
+  if (!hasCoreInput) flags.push("insufficient_market_data");
   return {
     ...envelope("market-anomaly-scan", input, market, options, warnings),
     risk_level: riskLevel,
-    flags: anomalies.map((item) => item.code),
+    flags,
     metrics: {
       price_change_h1_percent: h1Change,
       price_change_h24_percent: h24Change,

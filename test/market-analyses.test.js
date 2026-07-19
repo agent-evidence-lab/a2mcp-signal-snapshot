@@ -118,7 +118,7 @@ test("all five builders return the exact shared envelope and unique catalog serv
   }
 });
 
-test("market snapshot reports identity, valuation, windows, age, and top pools without risk fields", () => {
+test("market snapshot reports informational classification with identity, valuation, windows, age, and pools", () => {
   const secondary = pair({
     pairAddress: "0xpair-secondary",
     dexId: "sushiswap",
@@ -147,7 +147,8 @@ test("market snapshot reports identity, valuation, windows, age, and top pools w
     "0xpair-primary",
     "0xpair-secondary",
   ]);
-  assert.equal("risk_level" in result, false);
+  assert.equal(result.classification, "informational");
+  assert.deepEqual(result.flags, []);
   assert.equal("anomalies" in result, false);
 });
 
@@ -227,6 +228,17 @@ test("liquidity risk respects the optional minimum-liquidity threshold", () => {
   assert.ok(result.flags.includes("below_requested_minimum"));
 });
 
+test("liquidity risk treats exact requested minimum liquidity as meeting the threshold", () => {
+  const result = buildLiquidityRisk(
+    { ...input, min_liquidity_usd: 250_000 },
+    withLiquidity(250_000),
+    deterministic,
+  );
+
+  assert.equal(result.liquidity.meets_minimum, true);
+  assert.ok(!result.flags.includes("below_requested_minimum"));
+});
+
 test("trading activity exposes all required windows and classifies zero 24h transactions as inactive", () => {
   const primary = pair({
     volume: { m5: 0, h1: 0, h6: 0, h24: 0 },
@@ -270,6 +282,26 @@ test("trading activity does not mark exactly 80 percent as one-sided but flags v
   assert.equal(above.activity.windows.h24.buy_ratio, 0.81);
   assert.equal(above.activity.classification, "one-sided");
   assert.ok(above.flags.includes("one_sided_buying"));
+});
+
+test("trading activity does not mark exactly 80 percent selling as one-sided but flags values above it", () => {
+  const exact = buildTradingActivity(
+    input,
+    market(pair({ txns: { h24: { buys: 20, sells: 80 } } })),
+    deterministic,
+  );
+  const above = buildTradingActivity(
+    input,
+    market(pair({ txns: { h24: { buys: 19, sells: 81 } } })),
+    deterministic,
+  );
+
+  assert.equal(exact.activity.windows.h24.sell_ratio, 0.8);
+  assert.equal(exact.activity.classification, "active");
+  assert.ok(!exact.flags.includes("one_sided_selling"));
+  assert.equal(above.activity.windows.h24.sell_ratio, 0.81);
+  assert.equal(above.activity.classification, "one-sided");
+  assert.ok(above.flags.includes("one_sided_selling"));
 });
 
 test("trading activity keeps missing windows and partial counts unknown", () => {
@@ -321,6 +353,17 @@ test("new-pair risk raises severity once below 50k liquidity and caps at critica
 
   assert.equal(buildNewPairRisk(input, market(oldPair), deterministic).risk_level, "medium");
   assert.equal(buildNewPairRisk(input, market(youngPair), deterministic).risk_level, "critical");
+});
+
+test("new-pair risk does not escalate at exactly 50k liquidity", () => {
+  const oldPair = pair({
+    pairCreatedAt: FIXED_NOW - (14 * 24 * 60 * 60 * 1_000),
+    liquidity: { usd: 50_000 },
+  });
+  const result = buildNewPairRisk(input, market(oldPair), deterministic);
+
+  assert.equal(result.risk_level, "low");
+  assert.ok(!result.flags.includes("low_launch_liquidity"));
 });
 
 test("new-pair risk considers the conservative profile without weakening the mandatory 50k rule", () => {
@@ -395,6 +438,46 @@ test("market anomaly respects custom threshold and lookback without replacing co
   assert.equal(result.custom_check.triggered, true);
   assert.ok(result.anomalies.some((item) => item.code === "price_change_h1"));
   assert.ok(result.anomalies.some((item) => item.code === "custom_price_change_h6"));
+});
+
+test("market anomaly does not flag values immediately below every core threshold", () => {
+  const buySide = buildMarketAnomaly(
+    input,
+    market(pair({
+      priceChange: { h1: 19.999, h24: 49.999 },
+      volume: { h24: 499_900 },
+      txns: { h24: { buys: 84_999, sells: 15_001 } },
+      liquidity: { usd: 100_000 },
+    })),
+    deterministic,
+  );
+  const sellSide = buildMarketAnomaly(
+    input,
+    market(pair({
+      priceChange: { h1: -19.999, h24: -49.999 },
+      volume: { h24: 499_900 },
+      txns: { h24: { buys: 15_001, sells: 84_999 } },
+      liquidity: { usd: 100_000 },
+    })),
+    deterministic,
+  );
+
+  for (const result of [buySide, sellSide]) {
+    assert.equal(result.metrics.volume_liquidity_ratio_h24, 4.999);
+    assert.deepEqual(result.anomalies, []);
+    assert.deepEqual(result.flags, []);
+    assert.equal(result.risk_level, "low");
+  }
+});
+
+test("market anomaly reports unknown when every core input is unavailable", () => {
+  const result = buildMarketAnomaly(input, market(null), deterministic);
+
+  assert.equal(result.data_quality.status, "unavailable");
+  assert.equal(result.risk_level, "unknown");
+  assert.deepEqual(result.anomalies, []);
+  assert.ok(result.flags.includes("insufficient_market_data"));
+  assert.ok(result.data_quality.warnings.includes("core_anomaly_inputs_unavailable"));
 });
 
 test("market anomaly never fabricates ratios for zero or missing liquidity and transactions", () => {
