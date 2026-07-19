@@ -5,6 +5,7 @@ export function createTtlCache({ maxEntries = 256, now = () => Date.now() } = {}
 
   const entries = new Map();
   const pendingLoads = new Map();
+  let insertionSequence = 0;
 
   function purgeExpired() {
     const currentTime = now();
@@ -35,10 +36,10 @@ export function createTtlCache({ maxEntries = 256, now = () => Date.now() } = {}
       .slice(0, availableEntries);
     if (restored.length === 0) return;
 
-    const retained = [...entries];
+    const orderedEntries = [...restored, ...entries]
+      .sort(([, first], [, second]) => first.sequence - second.sequence);
     entries.clear();
-    for (const [key, entry] of restored) entries.set(key, entry);
-    for (const [key, entry] of retained) entries.set(key, entry);
+    for (const [key, entry] of orderedEntries) entries.set(key, entry);
   }
 
   function waitForPendingLoad() {
@@ -77,7 +78,11 @@ export function createTtlCache({ maxEntries = 256, now = () => Date.now() } = {}
           (value) => {
             if (pendingLoads.get(key) === load) pendingLoads.delete(key);
             purgeExpired();
-            entries.set(key, { value, expiresAt: now() + ttlMs });
+            entries.set(key, {
+              value,
+              expiresAt: now() + ttlMs,
+              sequence: insertionSequence++,
+            });
             while (entries.size + pendingLoads.size > maxEntries) {
               evictOldestEntry();
             }

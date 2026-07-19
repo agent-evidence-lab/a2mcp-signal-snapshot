@@ -110,6 +110,39 @@ test("ttl cache preserves a cached value when a full-capacity miss rejects", asy
   assert.equal(stableLoads, 1);
 });
 
+test("ttl cache restores concurrent failed misses in original FIFO order", async (t) => {
+  for (const failureOrder of [["C", "D"], ["D", "C"]]) {
+    await t.test(`when ${failureOrder.join(" then ")} rejects`, async () => {
+      const calls = new Map();
+      const rejectLoads = new Map();
+      const cache = createTtlCache({ maxEntries: 2 });
+      const load = (key) => cache.getOrLoad(key, 10_000, async () => {
+        const count = (calls.get(key) ?? 0) + 1;
+        calls.set(key, count);
+        return `${key}-${count}`;
+      });
+      const fail = (key) => cache.getOrLoad(key, 10_000, () => (
+        new Promise((resolve, reject) => rejectLoads.set(key, reject))
+      ));
+
+      assert.equal(await load("A"), "A-1");
+      assert.equal(await load("B"), "B-1");
+      const failures = { C: fail("C"), D: fail("D") };
+      await Promise.resolve();
+
+      for (const key of failureOrder) {
+        rejectLoads.get(key)(new Error(`${key} failed`));
+        await assert.rejects(failures[key], new RegExp(`${key} failed`));
+      }
+
+      assert.equal(await load("E"), "E-1");
+      assert.equal(await load("B"), "B-1");
+      assert.equal(await load("A"), "A-2");
+      assert.equal(calls.get("B"), 1);
+    });
+  }
+});
+
 test("ttl cache de-duplicates concurrent loads for one key", async () => {
   let calls = 0;
   let release;
