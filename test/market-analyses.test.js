@@ -487,6 +487,26 @@ test("new-pair risk does not infer low risk from old age when all critical launc
   assert.ok(result.data_quality.warnings.includes("launch_critical_inputs_unavailable"));
 });
 
+test("new-pair risk keeps an old pair unknown when static price is the only market evidence", () => {
+  const sparsePair = pair({
+    pairCreatedAt: FIXED_NOW - (30 * 24 * HOUR_MS),
+    priceUsd: 1.25,
+    priceNative: null,
+    priceChange: {},
+    volume: {},
+    txns: {},
+    liquidity: { usd: null, base: null, quote: null },
+  });
+  const result = buildNewPairRisk(input, market(sparsePair), deterministic);
+
+  assert.equal(result.pair_age_hours, 720);
+  assert.equal(result.risk_level, "unknown");
+  assert.equal(result.coverage.price, true);
+  assert.equal(result.coverage.trading, false);
+  assert.equal(result.coverage.liquidity, false);
+  assert.ok(result.flags.includes("insufficient_launch_data"));
+});
+
 test("market anomaly flags inclusive price, direction, and volume-liquidity thresholds", () => {
   const primary = pair({
     priceChange: { h1: -20, h24: 50 },
@@ -618,6 +638,48 @@ test("market anomaly honors a triggering custom-only check when default windows 
   });
 });
 
+test("market anomaly replaces the default threshold for the same custom lookback window", () => {
+  const result = buildMarketAnomaly(
+    { ...input, lookback_hours: 1, anomaly_threshold: 20 },
+    market(pair({
+      priceChange: { h1: 25, h24: 5 },
+      volume: { h24: 100_000 },
+      txns: { h24: { buys: 50, sells: 50 } },
+      liquidity: { usd: 100_000 },
+    })),
+    deterministic,
+  );
+
+  assert.equal(result.custom_check.window, "h1");
+  assert.equal(result.custom_check.triggered, true);
+  assert.equal(result.anomalies.length, 1);
+  assert.deepEqual(result.anomalies.map((item) => item.code), ["custom_price_change_h1"]);
+  assert.equal(result.risk_level, "medium");
+  assert.equal(result.coverage.executable_checks, 5);
+  assert.equal(result.coverage.total_checks, 5);
+});
+
+test("market anomaly still escalates genuinely independent anomaly signals", () => {
+  const result = buildMarketAnomaly(
+    { ...input, lookback_hours: 6, anomaly_threshold: 10 },
+    market(pair({
+      priceChange: { h1: 5, h6: 12, h24: 55 },
+      volume: { h24: 100_000 },
+      txns: { h24: { buys: 50, sells: 50 } },
+      liquidity: { usd: 100_000 },
+    })),
+    deterministic,
+  );
+
+  assert.deepEqual(result.anomalies.map((item) => item.code), [
+    "price_change_h24",
+    "custom_price_change_h6",
+  ]);
+  assert.equal(result.risk_level, "high");
+  assert.equal(result.coverage.executable_checks, 6);
+  assert.equal(result.coverage.total_checks, 6);
+});
+
 test("market anomaly never fabricates ratios for zero or missing liquidity and transactions", () => {
   const zeroLiquidity = buildMarketAnomaly(
     input,
@@ -723,6 +785,26 @@ test("numeric hardening sanitizes non-finite input and source metadata before ou
   assert.equal(result.input.lookback_hours, null);
   assert.equal(result.sources[0].pairCount, null);
   assert.ok(result.data_quality.warnings.includes("invalid_non_finite_numeric"));
+  assertAllNumbersFinite(result);
+});
+
+test("data quality sanitizes malformed provider warnings before returning or serializing", () => {
+  const malformedMarket = market();
+  malformedMarket.data_quality.warnings = [
+    "provider warning",
+    Number.POSITIVE_INFINITY,
+    { nested: Number.NaN },
+  ];
+
+  const result = buildMarketSnapshot(input, malformedMarket, deterministic);
+  const serialized = JSON.parse(JSON.stringify(result));
+
+  assert.ok(result.data_quality.warnings.every((warning) => typeof warning === "string"));
+  assert.ok(result.data_quality.warnings.includes("provider warning"));
+  assert.ok(result.data_quality.warnings.includes("invalid_non_finite_numeric"));
+  assert.ok(result.data_quality.warnings.includes("invalid_provider_warning"));
+  assert.ok(!result.data_quality.warnings.includes(Number.POSITIVE_INFINITY));
+  assert.ok(!serialized.data_quality.warnings.includes(null));
   assertAllNumbersFinite(result);
 });
 

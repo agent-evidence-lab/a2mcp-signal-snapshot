@@ -68,8 +68,19 @@ function analysisContext(options = {}) {
 }
 
 function providerWarnings(market) {
-  const warnings = market?.data_quality?.warnings;
-  return Array.isArray(warnings) ? [...warnings] : [];
+  const providerValues = market?.data_quality?.warnings;
+  if (!Array.isArray(providerValues)) return [];
+
+  const warnings = [];
+  for (const warning of providerValues) {
+    if (typeof warning === "string") {
+      addWarning(warnings, warning);
+      continue;
+    }
+    sanitizeOutput(warning, warnings);
+    addWarning(warnings, "invalid_provider_warning");
+  }
+  return warnings;
 }
 
 function dataQuality(market, warnings, sources) {
@@ -428,7 +439,7 @@ export function buildNewPairRisk(input, market, options = {}) {
     || Object.values(priceChanges).some((value) => value !== null);
   const hasTradingEvidence = Object.values(volume).some((value) => value !== null)
     || Object.values(transactions).some((counts) => counts.buys !== null || counts.sells !== null);
-  const hasCriticalEvidence = liquidityUsd !== null || hasPriceEvidence || hasTradingEvidence;
+  const hasSafetyEvidence = liquidityUsd !== null || hasTradingEvidence;
   const acceptedProfiles = new Set(["conservative", "balanced", "aggressive"]);
   const requestedProfile = input?.risk_profile;
   const riskProfile = acceptedProfiles.has(requestedProfile) ? requestedProfile : "balanced";
@@ -450,8 +461,8 @@ export function buildNewPairRisk(input, market, options = {}) {
     }
     if (riskLevel !== "unknown") riskLevel = raiseSeverity(riskLevel);
   }
-  if (!hasCriticalEvidence) {
-    riskLevel = "unknown";
+  if (!hasSafetyEvidence) {
+    if (riskLevel === "low") riskLevel = "unknown";
     flags.push("insufficient_launch_data");
     addWarning(warnings, "launch_critical_inputs_unavailable");
   }
@@ -500,11 +511,44 @@ export function buildMarketAnomaly(input, market, options = {}) {
   const volumeLiquidityRatio = safeRatio(h24Volume, liquidityUsd, warnings);
   const anomalies = [];
 
-  if (h1Change !== null && Math.abs(h1Change) >= 20) {
-    anomalies.push(anomaly("price_change_h1", "h1", h1Change, 20, h1Change >= 0 ? "up" : "down"));
+  const customThreshold = numberOrNull(
+    input?.anomaly_threshold,
+    warnings,
+    { nonNegative: true },
+  );
+  const requestedLookback = numberOrNull(input?.lookback_hours, warnings, { nonNegative: true });
+  let customCheck = null;
+  if (customThreshold !== null) {
+    const window = selectedLookbackWindow(requestedLookback ?? 24);
+    const value = numberOrNull(primary?.priceChange?.[window], warnings);
+    customCheck = {
+      window,
+      threshold_percent: customThreshold,
+      price_change_percent: value,
+      triggered: value === null ? null : Math.abs(value) >= customThreshold,
+    };
+    if (value === null) addWarning(warnings, "custom_anomaly_window_unavailable");
   }
-  if (h24Change !== null && Math.abs(h24Change) >= 50) {
-    anomalies.push(anomaly("price_change_h24", "h24", h24Change, 50, h24Change >= 0 ? "up" : "down"));
+
+  const h1Threshold = customCheck?.window === "h1" ? customThreshold : 20;
+  if (h1Change !== null && Math.abs(h1Change) >= h1Threshold) {
+    anomalies.push(anomaly(
+      customCheck?.window === "h1" ? "custom_price_change_h1" : "price_change_h1",
+      "h1",
+      h1Change,
+      h1Threshold,
+      h1Change >= 0 ? "up" : "down",
+    ));
+  }
+  const h24Threshold = customCheck?.window === "h24" ? customThreshold : 50;
+  if (h24Change !== null && Math.abs(h24Change) >= h24Threshold) {
+    anomalies.push(anomaly(
+      customCheck?.window === "h24" ? "custom_price_change_h24" : "price_change_h24",
+      "h24",
+      h24Change,
+      h24Threshold,
+      h24Change >= 0 ? "up" : "down",
+    ));
   }
   if (h24Txns.buyRatio !== null && h24Txns.buyRatio >= 0.85) {
     anomalies.push(anomaly("buy_ratio_h24", "h24", h24Txns.buyRatio, 0.85, "buy"));
@@ -516,33 +560,15 @@ export function buildMarketAnomaly(input, market, options = {}) {
     anomalies.push(anomaly("volume_liquidity_ratio_h24", "h24", volumeLiquidityRatio, 5));
   }
 
-  const customThreshold = numberOrNull(
-    input?.anomaly_threshold,
-    warnings,
-    { nonNegative: true },
-  );
-  const requestedLookback = numberOrNull(input?.lookback_hours, warnings, { nonNegative: true });
-  let customCheck = null;
-  if (customThreshold !== null) {
-    const window = selectedLookbackWindow(requestedLookback ?? 24);
-    const value = numberOrNull(primary?.priceChange?.[window], warnings);
-    const triggered = value === null ? null : Math.abs(value) >= customThreshold;
-    customCheck = {
-      window,
-      threshold_percent: customThreshold,
-      price_change_percent: value,
-      triggered,
-    };
-    if (triggered) {
-      anomalies.push(anomaly(
-        `custom_price_change_${window}`,
-        window,
-        value,
-        customThreshold,
-        value >= 0 ? "up" : "down",
-      ));
-    }
-    if (value === null) addWarning(warnings, "custom_anomaly_window_unavailable");
+  if (customCheck?.window === "h6" && customCheck.triggered) {
+    const value = customCheck.price_change_percent;
+    anomalies.push(anomaly(
+      "custom_price_change_h6",
+      "h6",
+      value,
+      customThreshold,
+      value >= 0 ? "up" : "down",
+    ));
   }
 
   if (h24Txns.buyRatio === null || h24Txns.sellRatio === null || volumeLiquidityRatio === null) {
@@ -556,8 +582,9 @@ export function buildMarketAnomaly(input, market, options = {}) {
     h24Txns.sellRatio,
     volumeLiquidityRatio,
   ].filter((value) => value !== null).length;
-  const customExecutableChecks = customCheck?.triggered !== null && customCheck !== null ? 1 : 0;
-  const totalChecks = 5 + (customThreshold !== null ? 1 : 0);
+  const customAddsIndependentCheck = customCheck?.window === "h6";
+  const customExecutableChecks = customAddsIndependentCheck && customCheck.triggered !== null ? 1 : 0;
+  const totalChecks = 5 + (customAddsIndependentCheck ? 1 : 0);
   const executableChecks = defaultExecutableChecks + customExecutableChecks;
   const coverageRatio = safeRatio(executableChecks, totalChecks, warnings);
   const completeCoverage = executableChecks === totalChecks;
