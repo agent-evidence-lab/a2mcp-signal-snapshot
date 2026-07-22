@@ -1,31 +1,31 @@
 import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 
+import {
+  API_SERVICES,
+  LEGACY_PATHS,
+  SERVICE_BY_ID,
+  feeToMinimal,
+} from "../src/intelligence/catalog.js";
+
 const startedHere = !process.env.A2MCP_BASE_URL;
 const port = process.env.PORT || "18788";
 const baseUrl = process.env.A2MCP_BASE_URL || `http://localhost:${port}`;
+const tokenBody = {
+  chain: "solana",
+  token_address: "So11111111111111111111111111111111111111112",
+};
+const mcpFee = process.env.MCP_FEE_USDT || "0.03";
 let child;
 
 const endpointBodies = [
-  ["/mcp", {
-    jsonrpc: "2.0",
-    id: 1,
-    method: "tools/list",
-  }],
-  ["/api/token-risk-scan", {
-    chain: "solana",
-    token_address: "So11111111111111111111111111111111111111112",
-  }],
-  ["/api/ape-pretrade-check", {
-    chain: "solana",
-    token_address: "So11111111111111111111111111111111111111112",
-    mode: "quick",
-  }],
-  ["/api/signal-snapshot", {
-    chain: "solana",
-    address: "So11111111111111111111111111111111111111112",
-    mode: "token",
-  }],
+  ...API_SERVICES.map((service) => [service.path, tokenBody, service.fee]),
+  ...Object.entries(LEGACY_PATHS).map(([path, serviceId]) => [
+    path,
+    tokenBody,
+    SERVICE_BY_ID.get(serviceId).fee,
+  ]),
+  ["/mcp", { jsonrpc: "2.0", id: 1, method: "tools/list" }, mcpFee],
 ];
 
 function decodePaymentRequired(header) {
@@ -62,30 +62,29 @@ async function main() {
 
   await waitForHealth();
 
-  for (const [path, body] of endpointBodies) {
+  for (const [path, body, fee] of endpointBodies) {
     const response = await fetch(`${baseUrl}${path}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
-
     const paymentRequired = response.headers.get("payment-required");
     console.log(`POST ${path}`, response.status);
-    console.log("PAYMENT-REQUIRED header present:", Boolean(paymentRequired));
-    console.log(await response.json());
-
     if (response.status !== 402 || !paymentRequired) {
       throw new Error(`Expected HTTP 402 with PAYMENT-REQUIRED header for ${path}.`);
     }
 
     const decoded = decodePaymentRequired(paymentRequired);
     const [requirement] = decoded.accepts || [];
-    console.log("Decoded accepts[0]", requirement);
-
-    if (!requirement?.asset || !requirement?.amount || !requirement?.extra?.decimals) {
-      throw new Error("Expected decoded payment requirements to include asset, amount, and token decimals.");
+    if (requirement?.asset !== "0x779ded0c9e1022225f8e0630b35a9b54be713736") {
+      throw new Error(`Unexpected x402 asset for ${path}.`);
     }
-
+    if (requirement?.amount !== feeToMinimal(fee, 6)) {
+      throw new Error(`Expected ${fee} USDT for ${path}, got ${requirement?.amount}.`);
+    }
+    if (requirement?.extra?.decimals !== 6) {
+      throw new Error(`Expected six token decimals for ${path}.`);
+    }
     if (decoded.resource?.url !== `${baseUrl}${path}`) {
       throw new Error(`Expected an absolute resource URL for ${path}, got ${decoded.resource?.url}.`);
     }

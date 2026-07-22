@@ -1,9 +1,21 @@
 import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 
+import { API_SERVICES, LEGACY_PATHS } from "../src/intelligence/catalog.js";
+
 const startedHere = !process.env.A2MCP_BASE_URL;
 const port = process.env.PORT || "18787";
 const baseUrl = process.env.A2MCP_BASE_URL || `http://localhost:${port}`;
+const tokenBody = {
+  chain: "solana",
+  token_address: "So11111111111111111111111111111111111111112",
+  language: "zh-CN",
+};
+const evmTokenBody = {
+  chain: "ethereum",
+  token_address: "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+  language: "zh-CN",
+};
 let child;
 
 async function waitForHealth() {
@@ -26,10 +38,8 @@ async function postJson(path, body) {
     body: JSON.stringify(body),
   });
   const payload = await response.json();
-  console.log(`POST ${path}`, response.status, payload);
-  if (!response.ok) {
-    throw new Error(`Expected POST ${path} to succeed.`);
-  }
+  console.log(`POST ${path}`, response.status, payload.service?.id || payload.error?.code);
+  if (!response.ok) throw new Error(`Expected POST ${path} to succeed: ${JSON.stringify(payload)}`);
   return payload;
 }
 
@@ -37,14 +47,19 @@ function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
+function assertEnvelope(payload, serviceId, path) {
+  assert(payload.ok === true, `${path} should return ok=true.`);
+  assert(payload.service?.id === serviceId, `${path} should identify ${serviceId}.`);
+  assert(typeof payload.request_id === "string", `${path} should return request_id.`);
+  assert(Number.isFinite(Date.parse(payload.generated_at)), `${path} should return generated_at.`);
+  assert(payload.data_quality && typeof payload.data_quality === "object", `${path} should return data_quality.`);
+  assert(Array.isArray(payload.sources), `${path} should return sources.`);
+}
+
 async function main() {
   if (startedHere) {
     child = spawn(process.execPath, ["src/server.js"], {
-      env: {
-        ...process.env,
-        PORT: port,
-        PAYMENT_MODE: "demo",
-      },
+      env: { ...process.env, PORT: port, PAYMENT_MODE: "demo" },
       stdio: ["ignore", "pipe", "pipe"],
     });
     child.stdout.on("data", (chunk) => process.stdout.write(chunk));
@@ -53,76 +68,60 @@ async function main() {
 
   await waitForHealth();
 
-  const health = await fetch(`${baseUrl}/health`);
-  const healthBody = await health.json();
-  console.log("GET /health", health.status, healthBody);
-  assert(Array.isArray(healthBody.services), "Health should list services.");
+  const health = await fetch(`${baseUrl}/health`).then((response) => response.json());
+  assert(health.services?.length === 8, "Health should expose exactly eight canonical services.");
 
-  const metadata = await fetch(`${baseUrl}/metadata`);
-  const metadataBody = await metadata.json();
-  console.log("GET /metadata", metadata.status, metadataBody);
-  assert(metadataBody.services?.length >= 3, "Metadata should expose multiple A2MCP services.");
-  assert(metadataBody.suite?.mcpEndpointPath === "/mcp", "Metadata should expose the MCP endpoint.");
-  assert(
-    metadataBody.suite?.name === "Codex Evidence Lab A2MCP Suite",
-    "Metadata should use the same product identity as the marketplace Agent.",
-  );
-  assert(
-    metadataBody.services.every((service) => service.suggestedFeeUsdt === "0.01"),
-    "Displayed service fees should match the default x402 payment challenge.",
-  );
-  assert(
-    metadataBody.services[0]?.description.includes("DexScreener"),
-    "Token Risk Guard metadata should name its actual data source.",
-  );
-  assert(
-    metadataBody.services[0]?.outputGuarantees.some((item) => item.includes("unavailable")),
-    "Token Risk Guard metadata should disclose unsupported risk fields.",
-  );
+  const metadata = await fetch(`${baseUrl}/metadata`).then((response) => response.json());
+  assert(metadata.services?.length === 8, "Metadata should expose eight A2MCP services.");
+  assert(metadata.suite?.mcpEndpointPath === "/mcp", "Metadata should expose the MCP endpoint.");
+  assert(metadata.suite?.name === "Codex Evidence Lab A2MCP Suite", "Suite identity should remain stable.");
+  for (const service of API_SERVICES) {
+    const exposed = metadata.services.find((entry) => entry.id === service.id);
+    assert(exposed?.suggestedFeeUsdt === service.fee, `${service.id} should expose its catalog fee.`);
+    assert(exposed?.endpointPath === service.path, `${service.id} should expose its canonical path.`);
+  }
 
-  const mcpInfo = await fetch(`${baseUrl}/mcp`);
-  const mcpInfoBody = await mcpInfo.json();
-  console.log("GET /mcp", mcpInfo.status, mcpInfoBody);
-  assert(mcpInfoBody.tools?.length >= 3, "MCP endpoint should expose tools.");
+  const openapi = await fetch(`${baseUrl}/openapi.json`).then((response) => response.json());
+  for (const service of API_SERVICES) {
+    assert(openapi.paths?.[service.path]?.post, `OpenAPI should expose ${service.path}.`);
+  }
 
-  const tokenBody = {
-    chain: "solana",
-    token_address: "So11111111111111111111111111111111111111112",
-    language: "zh-CN",
-  };
+  const mcpInfo = await fetch(`${baseUrl}/mcp`).then((response) => response.json());
+  assert(mcpInfo.tools?.length === 8, "MCP endpoint should expose eight tools.");
 
-  const tokenRisk = await postJson("/api/token-risk-scan", tokenBody);
-  assert(typeof tokenRisk.risk_score === "number", "Token Risk Guard should return risk_score.");
-  assert(tokenRisk.risk_level, "Token Risk Guard should return risk_level.");
-  assert(tokenRisk.data_quality, "Token Risk Guard should return data_quality.");
+  for (const service of API_SERVICES) {
+    const input = service.supportedSecurityChains ? evmTokenBody : tokenBody;
+    const payload = await postJson(service.path, input);
+    assertEnvelope(payload, service.id, service.path);
+  }
+
+  for (const [legacyPath, serviceId] of Object.entries(LEGACY_PATHS)) {
+    const payload = await postJson(legacyPath, tokenBody);
+    assertEnvelope(payload, serviceId, legacyPath);
+  }
+
+  const invalidAddressResponse = await fetch(`${baseUrl}/api/contract-tax-check`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ chain: "ethereum", token_address: "0x1234" }),
+  });
+  const invalidAddress = await invalidAddressResponse.json();
+  assert(invalidAddressResponse.status === 400, "Malformed chain addresses should return HTTP 400.");
+  assert(invalidAddress.error?.code === "INVALID_INPUT", "Provider validation should remain visible.");
 
   const mcpToolCall = await postJson("/mcp", {
     jsonrpc: "2.0",
     id: 1,
     method: "tools/call",
     params: {
-      name: "token_risk_scan",
+      name: "pretrade_risk_report",
       arguments: tokenBody,
     },
   });
-  assert(mcpToolCall.result?.structuredContent?.risk_score !== undefined, "MCP tools/call should return structuredContent.");
-
-  const apeGuard = await postJson("/api/ape-pretrade-check", {
-    ...tokenBody,
-    mode: "quick",
-  });
-  assert(typeof apeGuard.ape_score === "number", "ApeGuard should return ape_score.");
-  assert(apeGuard.decision_hint, "ApeGuard should return decision_hint.");
-
-  const snapshot = await postJson("/api/signal-snapshot", {
-    chain: "solana",
-    address: "So11111111111111111111111111111111111111112",
-    mode: "token",
-    question: "给我一个代币风险和市场信号快照",
-    lookbackHours: 24,
-    language: "zh-CN",
-  });
-  assert(snapshot.observations?.length > 0, "Signal Snapshot should return observations.");
+  assert(
+    mcpToolCall.result?.structuredContent?.service?.id === "pretrade-risk-report",
+    "MCP tools/call should dispatch to the requested service.",
+  );
 }
 
 main().catch((error) => {
