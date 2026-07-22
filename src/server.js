@@ -40,7 +40,10 @@ const PLACEHOLDER_PAY_TO = "0x0000000000000000000000000000000000000001";
 const PUBLIC_BASE_URL = normalizePublicBaseUrl(process.env.PUBLIC_BASE_URL);
 const PROVIDER_BUDGET_MS = environmentDuration(process.env.PROVIDER_BUDGET_MS, 4_500);
 const providers = createProviders({
-  timeoutMs: environmentDuration(process.env.PROVIDER_TIMEOUT_MS, 4_000),
+  timeoutMs: environmentDuration(
+    process.env.UPSTREAM_TIMEOUT_MS || process.env.PROVIDER_TIMEOUT_MS,
+    4_000,
+  ),
 });
 
 const MCP_SERVICE = Object.freeze({

@@ -1,9 +1,9 @@
 {
   "name": "a2mcp-signal-snapshot",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
-  "description": "A local A2MCP-style Web3 intelligence suite with token risk and pre-trade endpoints.",
+  "description": "Eight-service A2MCP Web3 market, security, and pre-trade intelligence suite.",
   "scripts": {
     "start": "node src/server.js",
     "start:mock-x402": "PAYMENT_MODE=mock-x402 node src/server.js",

@@ -1,209 +1,147 @@
 # Codex Evidence Lab A2MCP Suite
 
-Multi-endpoint A2MCP-style Web3 intelligence service for OKX.AI listing experiments.
+Eight separately listable Web3 intelligence services on one shared HTTP, MCP, data, and x402 runtime. The suite is designed for the OKX.AI `Codex Evidence Lab` Agent and returns structured evidence instead of trading promises.
 
-The current suite exposes three separately listable services on one shared runtime:
+## Service Catalog
 
-| Service | Endpoint | Positioning |
-|---|---|---|
-| Token Risk Guard | `POST /api/token-risk-scan` | Professional token risk scan for liquidity, volatility, data availability, and review hints. |
-| ApeGuard | `POST /api/ape-pretrade-check` | Short pre-trade meme/new-token check with an `ape_score` and decision hint. |
-| Web3 Signal Snapshot | `POST /api/signal-snapshot` | Generic Web3 signal snapshot for tokens, wallets, projects, or risk objects. |
+| Service | Canonical endpoint | Fee | Coverage |
+|---|---|---:|---|
+| 代币市场快照 | `POST /api/token-market-snapshot` | 0.01 USDT | Seven market chains |
+| 流动性风险扫描 | `POST /api/liquidity-risk-scan` | 0.01 USDT | Seven market chains |
+| 成交活跃度分析 | `POST /api/trading-activity-scan` | 0.01 USDT | Seven market chains |
+| 新币启动风险检查 | `POST /api/new-pair-risk-check` | 0.01 USDT | Seven market chains |
+| 价格成交异常扫描 | `POST /api/market-anomaly-scan` | 0.01 USDT | Seven market chains |
+| 合约权限与交易税检查 | `POST /api/contract-tax-check` | 0.02 USDT | EVM only |
+| 持仓集中度检查 | `POST /api/holder-concentration-check` | 0.02 USDT | EVM only |
+| 综合交易前风险报告 | `POST /api/pretrade-risk-report` | 0.03 USDT | Market on seven chains; full security on EVM |
 
-The first production direction is Token Risk Guard plus ApeGuard. They share the same data, scoring, and x402 payment layer, so more A2MCP endpoints can be added without rebuilding payment and deployment from scratch.
+Market chains: `solana`, `ethereum`, `xlayer`, `base`, `bsc`, `arbitrum`, and `polygon`.
 
-## Current Data Sources
+EVM security chains: `ethereum`, `xlayer`, `base`, `bsc`, `arbitrum`, and `polygon`. Solana contract and holder security fields stay explicitly unavailable until a separately tested Solana security provider is connected.
 
-- DexScreener token pairs API for public DEX liquidity, price, volume, pair age, and transaction-count fields.
-- Holder concentration and contract-permission fields are explicitly returned as unavailable in this MVP. The service does not infer or fabricate them.
+Legacy callers remain compatible:
+
+| Legacy endpoint | Canonical service |
+|---|---|
+| `/api/token-risk-scan` | `pretrade-risk-report` |
+| `/api/ape-pretrade-check` | `new-pair-risk-check` |
+| `/api/signal-snapshot` | `token-market-snapshot` |
+
+## Data and Output
+
+- DexScreener is the primary public market source.
+- GeckoTerminal is the market fallback.
+- GoPlus supplies EVM contract, tax, holder, owner, creator, and liquidity-holder fields.
+- Provider failures return a structured partial or unavailable result before the request budget expires.
+- Unknown fields remain `unknown`; they are never inferred as safe.
+- Every successful service response includes `service.id`, `request_id`, `generated_at`, `data_quality`, and `sources`.
+
+Default cache durations are 30 seconds for market data and 300 seconds for security data. The default upstream request timeout is 4 seconds and the total provider budget per service call is 4.5 seconds.
 
 ## Run Locally
 
+Requires Node.js 22.14 or newer.
+
 ```bash
+npm ci
 npm start
 ```
 
-Then call:
+Discovery endpoints:
 
 ```bash
-curl -s http://localhost:8787/health
-curl -s http://localhost:8787/metadata
-curl -s http://localhost:8787/mcp
-curl -s http://localhost:8787/openapi.json
+curl -fsS http://localhost:8787/health
+curl -fsS http://localhost:8787/metadata
+curl -fsS http://localhost:8787/mcp
+curl -fsS http://localhost:8787/openapi.json
 ```
 
-Token Risk Guard:
+Call the composite report:
 
 ```bash
-curl -s -X POST http://localhost:8787/api/token-risk-scan \
+curl -fsS -X POST http://localhost:8787/api/pretrade-risk-report \
   -H 'content-type: application/json' \
   -d '{
-    "chain": "solana",
-    "token_address": "So11111111111111111111111111111111111111112",
+    "chain": "ethereum",
+    "token_address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
     "language": "zh-CN"
   }'
 ```
 
-ApeGuard:
+Call the same tool over MCP JSON-RPC:
 
 ```bash
-curl -s -X POST http://localhost:8787/api/ape-pretrade-check \
-  -H 'content-type: application/json' \
-  -d '{
-    "chain": "solana",
-    "token_address": "So11111111111111111111111111111111111111112",
-    "mode": "quick",
-    "language": "zh-CN"
-  }'
-```
-
-Signal Snapshot:
-
-```bash
-curl -s -X POST http://localhost:8787/api/signal-snapshot \
-  -H 'content-type: application/json' \
-  -d '{
-    "chain": "solana",
-    "address": "So11111111111111111111111111111111111111112",
-    "mode": "token",
-    "question": "给我一个代币风险和市场信号快照",
-    "lookbackHours": 24,
-    "language": "zh-CN"
-  }'
-```
-
-MCP-style tool call:
-
-```bash
-curl -s -X POST http://localhost:8787/mcp \
+curl -fsS -X POST http://localhost:8787/mcp \
   -H 'content-type: application/json' \
   -d '{
     "jsonrpc": "2.0",
     "id": 1,
     "method": "tools/call",
     "params": {
-      "name": "token_risk_scan",
+      "name": "pretrade_risk_report",
       "arguments": {
-        "chain": "solana",
-        "token_address": "So11111111111111111111111111111111111111112",
-        "language": "zh-CN"
+        "chain": "ethereum",
+        "token_address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"
       }
     }
   }'
 ```
 
-## One-command Tests
-
-The smoke tests start and stop a local server automatically.
+## Tests
 
 ```bash
 npm test
 npm run test:x402
+npm run test:facilitator-config
 ```
 
-## Run Mock x402 Mode
+`npm test` runs unit tests and a live demo-mode smoke test across all eight canonical routes, all three aliases, and MCP. `test:x402` verifies the exact payment amount and resource URL for every paid route.
 
-This mode does not settle real payments. It verifies that unpaid requests return HTTP 402 plus a `PAYMENT-REQUIRED` header.
+## x402 Modes
+
+`PAYMENT_MODE=demo` executes services without a payment challenge. `mock-x402` returns test HTTP 402 challenges but never settles money. `okx-x402` uses the OKX facilitator and requires real credentials.
+
+Each canonical or legacy HTTP route uses its catalog fee. `/mcp` has a fixed default fee of 0.03 USDT because x402 issues the challenge before the server reads which MCP tool was selected.
+
+Production environment shape:
+
+```dotenv
+PAYMENT_MODE=okx-x402
+PUBLIC_BASE_URL=https://your-domain.example
+OKX_API_KEY=...
+OKX_SECRET_KEY=...
+OKX_PASSPHRASE=...
+X402_PAY_TO=0xYourReceivingAddress
+X402_NETWORK=eip155:196
+X402_ASSET=0x779ded0c9e1022225f8e0630b35a9b54be713736
+X402_TOKEN_NAME=USDt0
+X402_TOKEN_SYMBOL=USDT0
+X402_TOKEN_DECIMALS=6
+MCP_FEE_USDT=0.03
+```
+
+The code derives each minimal token amount from the service catalog and `X402_TOKEN_DECIMALS`; there is no global per-service amount to keep in sync manually.
+
+## Zeabur Deployment
+
+The included `Dockerfile` is sufficient for a GitHub-backed Zeabur service. Configure the variables from `.env.example` in Zeabur, set `PUBLIC_BASE_URL` to the provisioned HTTPS origin, and keep `.env` out of Git.
+
+Against a public demo/staging deployment, run the full response smoke test. Against a paid production deployment, run the x402 challenge test:
 
 ```bash
-PORT=8788 \
-PAYMENT_MODE=mock-x402 \
-PUBLIC_BASE_URL=https://your-public-domain.example \
-npm start
+A2MCP_BASE_URL=https://your-staging-domain.example npm run test:smoke
+A2MCP_BASE_URL=https://your-domain.example npm run test:x402
 ```
 
-Then test any endpoint:
+Production verification should confirm:
 
-```bash
-onchainos agent x402-check \
-  --endpoint http://localhost:8788/api/token-risk-scan \
-  --body '{"chain":"solana","token_address":"So11111111111111111111111111111111111111112"}'
+- `/health` reports version `0.3.0` and eight services.
+- `/metadata` exposes eight distinct service descriptions and fees.
+- `/openapi.json` contains every canonical path.
+- `GET /mcp` exposes eight tools.
+- Unpaid production calls return HTTP 402 with the correct absolute resource URL and fee.
+- A valid paid call settles through the OKX facilitator before the result is used for marketplace review.
 
-onchainos agent x402-check \
-  --endpoint http://localhost:8788/mcp \
-  --body '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
-```
+## Safety Boundary
 
-## Production x402 Mode
-
-Production payment mode requires OKX facilitator credentials and a real receiving address. Do not enable this until the receiving wallet and OKX payment setup are confirmed.
-
-```bash
-PORT=8788 \
-PAYMENT_MODE=okx-x402 \
-OKX_API_KEY=... \
-OKX_SECRET_KEY=... \
-OKX_PASSPHRASE=... \
-X402_PAY_TO=0xYourReceivingAddress \
-X402_PRICE='$0.01' \
-X402_NETWORK=eip155:196 \
-X402_ASSET=0x779ded0c9e1022225f8e0630b35a9b54be713736 \
-X402_AMOUNT_MINIMAL=10000 \
-X402_TOKEN_NAME='USDt0' \
-X402_TOKEN_SYMBOL=USDT0 \
-X402_TOKEN_DECIMALS=6 \
-npm start
-```
-
-`X402_PRICE` is kept for listing/metadata display. The actual payment challenge uses the explicit asset amount fields so validators can read token decimals without guessing.
-
-## Deployment Shape
-
-This folder includes deployment starters:
-
-- `.env.example`: local and production environment variables.
-- `Dockerfile`: container build for Node 22.14.
-- `deploy/systemd/a2mcp-signal-snapshot.service`: Linux service template.
-- `deploy/nginx/a2mcp-signal-snapshot.conf`: reverse proxy template before adding HTTPS.
-
-For OKX.AI A2MCP listing, the endpoint should be a stable public HTTPS URL. Localhost and temporary tunnels are only useful for development checks.
-
-Set `PUBLIC_BASE_URL` to the HTTPS origin so `/metadata` can include complete `endpointUrl` fields for each listable service.
-
-## Candidate OKX.AI A2MCP Listings
-
-Token Risk Guard:
-
-```text
-面向交易 Agent、研究 Agent 和钱包风控场景，按次返回结构化 Token 风险扫描结果，包括 risk_score、risk_level、flags、liquidity、holders、contract、suggested_action、data_quality 和 source URLs。第一版接入公开 DEX 数据源；未覆盖的数据会明确标记 unavailable，不编造。
-```
-
-Endpoint:
-
-```text
-https://<your-domain>/api/token-risk-scan
-```
-
-MCP endpoint:
-
-```text
-https://<your-domain>/mcp
-```
-
-ApeGuard:
-
-```text
-面向 meme / 新币交易前体检场景，输入 chain 和 token_address，返回 ape_score、risk_level、one_line、red_flags、market_status 和 decision_hint。输出只做风险提示，不构成买卖建议，也不执行交易。
-```
-
-Endpoint:
-
-```text
-https://<your-domain>/api/ape-pretrade-check
-```
-
-Suggested fee:
-
-```text
-0.01 USDT / call
-```
-
-## Production Checklist
-
-- Deploy to a stable public HTTPS endpoint.
-- Add more verifiable read-only data sources: explorer/security API for contract checks, holder distribution, and optional GoPlus/Honeypot providers.
-- Keep missing-data fields explicit with `data_quality`, `available`, `reason`, and source status.
-- Switch from `mock-x402` to `okx-x402` with real OKX facilitator credentials and receiving address.
-- Add request logging without storing user secrets.
-- Add rate limiting and timeout controls.
-- Test with a real agent client before registering on OKX.AI.
+The suite is read-only. It does not sign transactions, execute swaps, guarantee outcomes, or present results as financial advice. Risk scores summarize available evidence and always retain source and coverage information.
